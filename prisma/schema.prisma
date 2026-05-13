@@ -1,0 +1,84 @@
+// prisma/schema.prisma
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Restaurant {
+  id                String   @id @default(uuid())
+  slug              String   @unique // Identificador na URL: logos.com/marmitaria-do-chef
+  email             String   @unique
+  password          String
+  name              String
+  logo              String?  @default("ChefHat")
+  bannerImage       String?
+  bannerTitle       String?
+  bannerSubtitle    String?
+  openTime          String   @default("11:00")
+  closeTime         String   @default("21:00")
+  cutoffHour        Int      @default(14)
+  cutoffMinute      Int      @default(30)
+  pixKey            String?
+
+  cafeStart         String   @default("06:00")
+  cafeEnd           String   @default("10:00")
+  almocoStart       String   @default("11:00")
+  almocoEnd         String   @default("15:00")
+  jantaStart        String   @default("18:00")
+  jantaEnd          String   @default("22:00")
+
+  deliveryFee       Float    @default(5.00)
+  whatsapp          String?
+  // Configurações da Evolution API (Privado)
+  evolutionInstance String   @unique 
+  evolutionApiKey   String
+  
+  products          Product[]
+  orders            Order[]
+  createdAt         DateTime @default(now())
+}
+
+model Product {
+  id           String     @id @default(uuid())
+  name         String
+  description  String?
+  price        Float      @default(0) // Preço base (Pequena)
+  mediumPrice  Float?     @default(4) // Adicional Média
+  largePrice   Float?     @default(8) // Adicional Grande
+  image        String?
+  category     String     // "prato" ou "bebida"
+  available    Boolean    @default(false)
+  timeSlot     String     @default("almoco")
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id])
+  restaurantId String
+
+}
+
+   model Order {
+     id            String      @id @default(cuid())
+     createdAt     DateTime    @default(now())
+     status        String      @default("pending")
+     customerName  String
+     customerPhone String
+     orderType     String
+     address       String?
+     paymentMethod String
+     total         Float
+     restaurantId  String
+     restaurant    Restaurant  @relation(fields: [restaurantId], references: [id])
+     items         OrderItem[]
+   }
+ 
+   model OrderItem {
+     id       String  @id @default(cuid())
+     name     String
+     quantity Int
+     price    Float
+     size     String?
+     orderId  String
+     order    Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+   }
