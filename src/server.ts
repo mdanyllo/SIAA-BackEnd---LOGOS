@@ -2,7 +2,7 @@
 import 'dotenv/config'; 
 import express, { Request as ExpressRequest, Response, NextFunction } from 'express';
 import cors from 'cors';
-import { PrismaClient, Order } from '@prisma/client';
+import { PrismaClient } from '@prisma/client';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcrypt';
 import { v2 as cloudinary } from 'cloudinary';
@@ -51,108 +51,17 @@ const authenticateToken = (req: AuthRequest, res: Response, next: NextFunction) 
   });
 };
 
-setInterval(async () => {
-  try {
-    const now = new Date();
-    // Configurações para garantir o fuso horário de Brasília/Maranhão
-    const spTimeOpts = { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit', hour12: false } as const;
-    const currentTime = now.toLocaleTimeString('pt-BR', spTimeOpts);
-
-    const closingRestaurants = await prisma.restaurant.findMany({
-      where: { closeTime: currentTime }
-    });
-
-    for (const restaurant of closingRestaurants) {
-      // 1. O que já funcionava: Desativa os pratos do cardápio
-      await prisma.product.updateMany({
-        where: { restaurantId: restaurant.id, category: 'prato' },
-        data: { available: false }
-      });
-
-      // 2. NOVO: FECHAMENTO DE CAIXA
-      if (restaurant.whatsapp) {
-        // Define o início e fim do dia atual no fuso correto para a busca
-        const spDateStr = now.toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
-        const startOfDay = new Date(`${spDateStr}T00:00:00-03:00`);
-        const endOfDay = new Date(`${spDateStr}T23:59:59-03:00`);
-
-        // Pega todos os pedidos de hoje desse restaurante
-        const dailyOrders = await prisma.order.findMany({
-          where: {
-            restaurantId: restaurant.id,
-            createdAt: { gte: startOfDay, lte: endOfDay }
-          }
-        });
-
-        // Contadores
-        let faturamento = { cafe: 0, almoco: 0, janta: 0, outros: 0 };
-        let qtdPedidos = { cafe: 0, almoco: 0, janta: 0, outros: 0 };
-        let totalGeral = 0;
-
-        // Função auxiliar para converter "15:30" em minutos totais (facilita a conta)
-        const timeToMinutes = (t: string) => { 
-          const [h, m] = t.split(':').map(Number); 
-          return (h * 60) + m; 
-        };
-
-        const limites = {
-          cafe: [timeToMinutes(restaurant.cafeStart), timeToMinutes(restaurant.cafeEnd)],
-          almoco: [timeToMinutes(restaurant.almocoStart), timeToMinutes(restaurant.almocoEnd)],
-          janta: [timeToMinutes(restaurant.jantaStart), timeToMinutes(restaurant.jantaEnd)]
-        };
-
-        // Classifica cada pedido do dia
-        const processarPedido = (order: Order) => {
-          // Pega a hora do pedido no fuso de SP
-          const orderTimeStr = new Date(order.createdAt).toLocaleTimeString('pt-BR', spTimeOpts);
-          const orderMins = timeToMinutes(orderTimeStr);
-
-          // Verifica em qual janela de horário o pedido se encaixa
-          if (orderMins >= limites.cafe[0] && orderMins <= limites.cafe[1]) {
-            faturamento.cafe += order.total; qtdPedidos.cafe++;
-          } else if (orderMins >= limites.almoco[0] && orderMins <= limites.almoco[1]) {
-            faturamento.almoco += order.total; qtdPedidos.almoco++;
-          } else if (orderMins >= limites.janta[0] && orderMins <= limites.janta[1]) {
-            faturamento.janta += order.total; qtdPedidos.janta++;
-          } else {
-            faturamento.outros += order.total; qtdPedidos.outros++;
-          }
-          totalGeral += order.total;
-        });
-
-        // 3. Monta a mensagem profissional pro WhatsApp do Dono
-        const reportMsg = `📊 *FECHAMENTO DE CAIXA DIÁRIO* 📊\n` +
-                          `Restaurante: *${restaurant.name}*\n` +
-                          `Data: ${now.toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' })}\n\n` +
-                          `☕ *Café da Manhã:*\n` +
-                          `Pedidos: ${qtdPedidos.cafe} | Faturamento: R$ ${faturamento.cafe.toFixed(2).replace('.', ',')}\n\n` +
-                          `🍛 *Almoço:*\n` +
-                          `Pedidos: ${qtdPedidos.almoco} | Faturamento: R$ ${faturamento.almoco.toFixed(2).replace('.', ',')}\n\n` +
-                          `🌙 *Jantar:*\n` +
-                          `Pedidos: ${qtdPedidos.janta} | Faturamento: R$ ${faturamento.janta.toFixed(2).replace('.', ',')}\n\n` +
-                          (qtdPedidos.outros > 0 ? `🕑 *Fora de Hora:* R$ ${faturamento.outros.toFixed(2).replace('.', ',')}\n\n` : '') +
-                          `💵 *TOTAL GERAL:* R$ ${totalGeral.toFixed(2).replace('.', ',')} (${dailyOrders.length} pedidos)\n\n` +
-                          `_Operação encerrada. Bom descanso!_ 🚀`;
-
-        // 4. Usa a função global que criamos no Passo 2 para disparar a mensagem
-        await sendWhatsAppMessage(restaurant, restaurant.whatsapp, reportMsg);
-      }
-    }
-  } catch (error) {
-    console.error("Erro na rotina de fechamento de caixa:", error);
-  }
-}, 60000); // Roda a cada 1 minuto
-
-// --- FUNÇÃO GLOBAL DE DISPARO DE WHATSAPP ---
+// ============================================================================
+// 📱 FUNÇÃO GLOBAL: ENVIO DE WHATSAPP (CLIENTE E DONO)
+// ============================================================================
 const sendWhatsAppMessage = async (
   restaurant: any,
   targetNumber: string,
   messageText: string,
-  mediaUrl?: string // Opcional, usado para o comprovante
+  mediaUrl?: string
 ) => {
   if (!targetNumber) return;
 
-  // Tratamento de número
   let numeroLimpo = targetNumber.replace(/\D/g, '');
   if (numeroLimpo.startsWith('55')) numeroLimpo = numeroLimpo.substring(2);
   if (numeroLimpo.length === 10) numeroLimpo = `${numeroLimpo.substring(0, 2)}9${numeroLimpo.substring(2)}`;
@@ -189,6 +98,95 @@ const sendWhatsAppMessage = async (
   }
 };
 
+// ============================================================================
+// 🔄 ROTINA: FECHAMENTO DE CAIXA E DESATIVAÇÃO DE PRATOS (RODA A CADA 1 MINUTO)
+// ============================================================================
+setInterval(async () => {
+  try {
+    const now = new Date();
+    const spTimeOpts: Intl.DateTimeFormatOptions = { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit', hour12: false };
+    const currentTime = now.toLocaleTimeString('pt-BR', spTimeOpts);
+
+    const closingRestaurants = await prisma.restaurant.findMany({
+      where: { closeTime: currentTime }
+    });
+
+    for (const restaurant of closingRestaurants) {
+      // 1. Oculta pratos do cardápio
+      await prisma.product.updateMany({
+        where: { restaurantId: restaurant.id, category: 'prato' },
+        data: { available: false }
+      });
+
+      // 2. Fechamento de Caixa (Relatório WhatsApp)
+      if (restaurant.whatsapp) {
+        const spDateStr = now.toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
+        const startOfDay = new Date(`${spDateStr}T00:00:00-03:00`);
+        const endOfDay = new Date(`${spDateStr}T23:59:59-03:00`);
+
+        const dailyOrders = await prisma.order.findMany({
+          where: {
+            restaurantId: restaurant.id,
+            createdAt: { gte: startOfDay, lte: endOfDay }
+          }
+        });
+
+        let faturamento = { cafe: 0, almoco: 0, janta: 0, outros: 0 };
+        let qtdPedidos = { cafe: 0, almoco: 0, janta: 0, outros: 0 };
+        let totalGeral = 0;
+
+        const timeToMinutes = (t: string) => {
+          const [h, m] = t.split(':').map(Number);
+          return (h * 60) + m;
+        };
+
+        const limites = {
+          cafe: [timeToMinutes(restaurant.cafeStart), timeToMinutes(restaurant.cafeEnd)],
+          almoco: [timeToMinutes(restaurant.almocoStart), timeToMinutes(restaurant.almocoEnd)],
+          janta: [timeToMinutes(restaurant.jantaStart), timeToMinutes(restaurant.jantaEnd)]
+        };
+
+        dailyOrders.forEach(order => {
+          const orderTimeStr = new Date(order.createdAt).toLocaleTimeString('pt-BR', spTimeOpts);
+          const orderMins = timeToMinutes(orderTimeStr);
+
+          if (orderMins >= limites.cafe[0] && orderMins <= limites.cafe[1]) {
+            faturamento.cafe += order.total; qtdPedidos.cafe++;
+          } else if (orderMins >= limites.almoco[0] && orderMins <= limites.almoco[1]) {
+            faturamento.almoco += order.total; qtdPedidos.almoco++;
+          } else if (orderMins >= limites.janta[0] && orderMins <= limites.janta[1]) {
+            faturamento.janta += order.total; qtdPedidos.janta++;
+          } else {
+            faturamento.outros += order.total; qtdPedidos.outros++;
+          }
+          totalGeral += order.total;
+        });
+
+        const reportMsg = `📊 *FECHAMENTO DE CAIXA DIÁRIO* 📊\n` +
+                          `Restaurante: *${restaurant.name}*\n` +
+                          `Data: ${now.toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' })}\n\n` +
+                          `☕ *Café da Manhã:*\n` +
+                          `Pedidos: ${qtdPedidos.cafe} | Faturamento: R$ ${faturamento.cafe.toFixed(2).replace('.', ',')}\n\n` +
+                          `🍛 *Almoço:*\n` +
+                          `Pedidos: ${qtdPedidos.almoco} | Faturamento: R$ ${faturamento.almoco.toFixed(2).replace('.', ',')}\n\n` +
+                          `🌙 *Jantar:*\n` +
+                          `Pedidos: ${qtdPedidos.janta} | Faturamento: R$ ${faturamento.janta.toFixed(2).replace('.', ',')}\n\n` +
+                          (qtdPedidos.outros > 0 ? `🕑 *Fora de Hora:* R$ ${faturamento.outros.toFixed(2).replace('.', ',')}\n\n` : '') +
+                          `💵 *TOTAL GERAL:* R$ ${totalGeral.toFixed(2).replace('.', ',')} (${dailyOrders.length} pedidos)\n\n` +
+                          `_Operação encerrada. Bom descanso!_ 🚀`;
+
+        await sendWhatsAppMessage(restaurant, restaurant.whatsapp, reportMsg);
+      }
+    }
+  } catch (error) {
+    console.error("Erro na rotina de fechamento de caixa:", error);
+  }
+}, 60000);
+
+// ============================================================================
+// 🚀 ENDPOINTS DA API
+// ============================================================================
+
 app.post('/api/v1/upload', upload.single('file'), (req: ExpressRequest, res: Response) => {
   try {
     if (!req.file) return res.status(400).json({ error: "Nenhum arquivo enviado." });
@@ -217,8 +215,6 @@ app.get('/api/v1/restaurant/:slug', async (req: ExpressRequest, res: Response) =
 
 app.post('/api/v1/order', async (req: ExpressRequest, res: Response) => {
   const { restaurantId, cart, customerData, total } = req.body;
-  
-  // 1. Salva no banco de dados
   const savedOrder = await prisma.order.create({
     data: {
       restaurantId,
@@ -249,7 +245,6 @@ app.post('/api/v1/order', async (req: ExpressRequest, res: Response) => {
     const paymentBR = customerData.paymentMethod === 'pix' ? 'Pix' :
                       customerData.paymentMethod === 'card' ? 'Cartão' : 'Dinheiro';
 
-    // 2. Mensagem Exclusiva para o DONO (Mantida igual, com comprovante se houver)
     const ownerMsg = `*NOVO PEDIDO - ${restaurant.name}*\n\n` +
                      `👤 *Cliente:* ${customerData.name}\n` +
                      `📱 *WhatsApp:* ${customerData.phone}\n` +
@@ -260,18 +255,16 @@ app.post('/api/v1/order', async (req: ExpressRequest, res: Response) => {
                      `🛒 *Itens:*\n` +
                      cart.map((i: any) => `- ${i.quantity || 1}x ${i.name} (R$ ${(Number(i.price) * (i.quantity || 1)).toFixed(2).replace('.', ',')})`).join('\n');
 
-    // 3. Mensagem Exclusiva para o CLIENTE (Confirmação simples e amigável)
     const customerMsg = `Olá, *${customerData.name}*! 👋\n\n` +
                         `Recebemos o seu pedido no valor de *R$ ${total.toFixed(2).replace('.', ',')}*.\n` +
                         `Ele já caiu no nosso sistema e logo começaremos a prepará-lo! 👨‍🍳\n\n` +
                         `Avisaremos por aqui quando ele sair para entrega.`;
 
-    // 4. Disparos independentes
     if (restaurant.whatsapp) {
       await sendWhatsAppMessage(restaurant, restaurant.whatsapp, ownerMsg, customerData.receiptUrl);
     }
     if (customerData.phone) {
-      await sendWhatsAppMessage(restaurant, customerData.phone, customerMsg); // Sem o recibo, apenas texto
+      await sendWhatsAppMessage(restaurant, customerData.phone, customerMsg);
     }
 
     res.status(200).json({ success: true });
@@ -282,35 +275,25 @@ app.post('/api/v1/order', async (req: ExpressRequest, res: Response) => {
 
 app.get('/api/v1/siaa-admin/pdv/orders', authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
-    // 1. Busca os horários configurados pelo dono do restaurante
     const restaurant = await prisma.restaurant.findUnique({
       where: { id: req.restaurantId },
-      select: { 
-        cafeStart: true, cafeEnd: true, 
-        almocoStart: true, almocoEnd: true, 
-        jantaStart: true, jantaEnd: true 
-      }
+      select: { cafeStart: true, cafeEnd: true, almocoStart: true, almocoEnd: true, jantaStart: true, jantaEnd: true }
     });
 
     if (!restaurant) return res.status(404).json({ error: 'Restaurante não encontrado' });
 
-    // 2. Garante que o cálculo de tempo seja feito no fuso de Brasília/Maranhão (UTC-3)
-    // Usamos 'en-CA' para extrair a data no formato YYYY-MM-DD de forma limpa
     const spDateStr = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
     const currentSpTime = new Date().toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit', hour12: false });
 
-    // Função auxiliar para montar o objeto Date correto usando o fuso -03:00
     const getBoundaryDate = (timeStr: string) => new Date(`${spDateStr}T${timeStr}:00-03:00`);
     const currentTime = getBoundaryDate(currentSpTime);
 
-    // 3. Mapeia os turnos com base no banco de dados
     const slots = [
       { name: 'cafe', start: getBoundaryDate(restaurant.cafeStart), end: getBoundaryDate(restaurant.cafeEnd) },
       { name: 'almoco', start: getBoundaryDate(restaurant.almocoStart), end: getBoundaryDate(restaurant.almocoEnd) },
       { name: 'janta', start: getBoundaryDate(restaurant.jantaStart), end: getBoundaryDate(restaurant.jantaEnd) }
     ];
 
-    // 4. Verifica qual é o turno ativo neste exato minuto
     let activeSlotStart: Date | null = null;
     let activeSlotEnd: Date | null = null;
 
@@ -322,19 +305,14 @@ app.get('/api/v1/siaa-admin/pdv/orders', authenticateToken, async (req: AuthRequ
       }
     }
 
-    // 5. Se o dono do restaurante estiver fora de um turno ativo, o PDV retorna vazio (tela limpa)
     if (!activeSlotStart || !activeSlotEnd) {
-      return res.json([]);
+      return res.json([]); // Retorna vazio se estiver fora do horário
     }
 
-    // 6. Retorna apenas pedidos feitos DENTRO do turno ativo de hoje
     const orders = await prisma.order.findMany({
       where: { 
         restaurantId: req.restaurantId,
-        createdAt: {
-          gte: activeSlotStart,
-          lte: activeSlotEnd
-        }
+        createdAt: { gte: activeSlotStart, lte: activeSlotEnd }
       },
       include: { items: true },
       orderBy: { createdAt: 'desc' },
@@ -343,13 +321,12 @@ app.get('/api/v1/siaa-admin/pdv/orders', authenticateToken, async (req: AuthRequ
     res.json(orders);
   } catch (error) {
     console.error("Erro ao carregar PDV:", error);
-    res.status(500).json({ error: 'Erro interno ao carregar pedidos' });
+    res.status(500).json({ error: 'Erro interno' });
   }
-}); 
+});
 
 app.patch('/api/v1/siaa-admin/pdv/orders/:orderId/status', authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
-    // Busca o pedido E os dados do restaurante (para usar a Evolution API)
     const order = await prisma.order.findUnique({ 
       where: { id: req.params.orderId as string },
       include: { restaurant: true }
@@ -359,17 +336,15 @@ app.patch('/api/v1/siaa-admin/pdv/orders/:orderId/status', authenticateToken, as
     
     const newStatus = req.body.status;
 
-    // Atualiza o banco
     const updated = await prisma.order.update({
       where: { id: req.params.orderId as string },
       data: { status: newStatus },
       include: { items: true },
     });
 
-    // LÓGICA PASSIVA: Se o lojista clicou em "Pronto" (ready)
+    // Envio automático para o cliente quando o pedido está "Pronto"
     if (newStatus === 'ready') {
       let statusMsg = "";
-
       if (order.orderType === 'delivery') {
         statusMsg = `Boas notícias, *${order.customerName}*! 🛵💨\n\n` +
                     `Seu pedido acabou de *sair para entrega* e está a caminho do endereço:\n` +
@@ -381,8 +356,6 @@ app.patch('/api/v1/siaa-admin/pdv/orders/:orderId/status', authenticateToken, as
                     `Você já pode vir retirar no balcão.\n\n` +
                     `Agradecemos a preferência! 🍽️`;
       }
-
-      // Dispara para o cliente passivamente
       if (statusMsg && order.customerPhone) {
         await sendWhatsAppMessage(order.restaurant, order.customerPhone, statusMsg);
       }
@@ -390,7 +363,7 @@ app.patch('/api/v1/siaa-admin/pdv/orders/:orderId/status', authenticateToken, as
     
     res.json(updated);
   } catch (error) {
-    res.status(500).json({ error: 'Erro ao atualizar status' });
+    res.status(500).json({ error: 'Erro' });
   }
 });
 
@@ -486,10 +459,8 @@ app.post('/api/v1/siaa-admin/products', authenticateToken, async (req: AuthReque
 
 app.put('/api/v1/siaa-admin/products/:productId', authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
-    // 👇 Adicionado "as string"
     const product = await prisma.product.findUnique({ where: { id: req.params.productId as string } });
     if (!product || product.restaurantId !== req.restaurantId) return res.status(403).json({ error: "Negado" });
-    // 👇 Adicionado "as string"
     res.json(await prisma.product.update({ where: { id: req.params.productId as string }, data: req.body }));
   } catch (error) {
     res.status(500).json({ error: "Erro" });
@@ -498,7 +469,6 @@ app.put('/api/v1/siaa-admin/products/:productId', authenticateToken, async (req:
 
 app.delete('/api/v1/siaa-admin/products/:productId', authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
-    // 👇 Adicionado "as string"
     await prisma.product.delete({ where: { id: req.params.productId as string } });
     res.json({ success: true });
   } catch (error) {
