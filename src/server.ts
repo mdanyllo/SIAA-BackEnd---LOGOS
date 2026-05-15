@@ -99,7 +99,7 @@ const sendWhatsAppMessage = async (
 };
 
 // ============================================================================
-// 🔄 ROTINA: FECHAMENTO DE CAIXA E DESATIVAÇÃO DE PRATOS (RODA A CADA 1 MINUTO)
+// 🔄 ROTINA: ABERTURA, TURNOS E FECHAMENTO DE CAIXA (RODA A CADA 1 MINUTO)
 // ============================================================================
 setInterval(async () => {
   try {
@@ -107,18 +107,31 @@ setInterval(async () => {
     const spTimeOpts: Intl.DateTimeFormatOptions = { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit', hour12: false };
     const currentTime = now.toLocaleTimeString('pt-BR', spTimeOpts);
 
+    // 1. ROTINA DE ABERTURA: Reativa os pratos automaticamente no horário de abertura do restaurante
+    const openingRestaurants = await prisma.restaurant.findMany({
+      where: { openTime: currentTime }
+    });
+
+    for (const restaurant of openingRestaurants) {
+      await prisma.product.updateMany({
+        where: { restaurantId: restaurant.id, category: 'prato' },
+        data: { available: true }
+      });
+    }
+
+    // 2. ROTINA DE FECHAMENTO: Oculta os pratos e gera o Relatório de Caixa
     const closingRestaurants = await prisma.restaurant.findMany({
       where: { closeTime: currentTime }
     });
 
     for (const restaurant of closingRestaurants) {
-      // 1. Oculta pratos do cardápio
+      // Oculta pratos do cardápio
       await prisma.product.updateMany({
         where: { restaurantId: restaurant.id, category: 'prato' },
         data: { available: false }
       });
 
-      // 2. Fechamento de Caixa (Relatório WhatsApp)
+      // Fechamento de Caixa (Relatório WhatsApp)
       if (restaurant.whatsapp) {
         const spDateStr = now.toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
         const startOfDay = new Date(`${spDateStr}T00:00:00-03:00`);
@@ -268,10 +281,14 @@ app.post('/api/v1/order', async (req: ExpressRequest, res: Response) => {
                      `💰 *Total:* R$ ${total.toFixed(2).replace('.', ',')}\n\n` +
                      `🛒 *Itens:*\n${itemsListTxt}`;
 
+    // MENSAGEM DO CLIENTE DETALHADA E COM O TEMPO DE ENTREGA
     const customerMsg = `Olá, *${customerData.name}*! 👋\n\n` +
-                        `Recebemos o seu pedido no valor de *R$ ${total.toFixed(2).replace('.', ',')}*.\n` +
-                        `Ele já caiu no nosso sistema e logo começaremos a prepará-lo! 👨‍🍳\n\n` +
-                        `Avisaremos por aqui quando ele sair para entrega.`;
+                        `Recebemos o seu pedido com sucesso! 🎉\n\n` +
+                        `🛒 *Seu Pedido:*\n${itemsListTxt}\n\n` +
+                        `💰 *Total:* R$ ${total.toFixed(2).replace('.', ',')} (${paymentBR})\n` +
+                        `📦 *Forma:* ${orderTypeBR}\n\n` +
+                        `⏱️ *Tempo estimado:* 30-60 min\n\n` +
+                        `Já enviamos para a nossa cozinha e logo começaremos o preparo! 👨‍🍳 Avisaremos por aqui qualquer mudança no status do seu pedido.`;
 
     if (restaurant.whatsapp) {
       await sendWhatsAppMessage(restaurant, restaurant.whatsapp, ownerMsg, customerData.receiptUrl);
