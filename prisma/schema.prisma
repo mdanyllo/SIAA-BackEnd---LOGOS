@@ -46,39 +46,39 @@ model Product {
   id           String     @id @default(uuid())
   name         String
   description  String?
-  price        Float      @default(0) // Preço base (Pequena)
-  mediumPrice  Float?     @default(4) // Adicional Média
-  largePrice   Float?     @default(8) // Adicional Grande
+  price        Float      @default(0) // Preço base
+  variations   Json?      @default("[]") // Ex: [{"name": "Média", "price": 15}]
+  addOns       Json?      @default("[]") // Ex: [{"name": "Bacon", "price": 3}]
   image        String?
   category     String     // "prato" ou "bebida"
   available    Boolean    @default(false)
   timeSlot     String     @default("almoco")
   restaurant   Restaurant @relation(fields: [restaurantId], references: [id])
   restaurantId String
-
 }
 
-   model Order {
-     id            String      @id @default(cuid())
-     createdAt     DateTime    @default(now())
-     status        String      @default("pending")
-     customerName  String
-     customerPhone String
-     orderType     String
-     address       String?
-     paymentMethod String
-     total         Float
-     restaurantId  String
-     restaurant    Restaurant  @relation(fields: [restaurantId], references: [id])
-     items         OrderItem[]
-   }
- 
-   model OrderItem {
-     id       String  @id @default(cuid())
-     name     String
-     quantity Int
-     price    Float
-     size     String?
-     orderId  String
-     order    Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
-   }
+model OrderItem {
+  id        String  @id @default(cuid())
+  name      String
+  quantity  Int
+  price     Float
+  variation String? // Nome da variação escolhida (se houver)
+  addOns    Json?   // Array com os adicionais escolhidos
+  orderId   String
+  order     Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+}
+
+model Order {
+  id            String      @id @default(cuid())
+  createdAt     DateTime    @default(now())
+  status        String      @default("pending")
+  customerName  String
+  customerPhone String
+  orderType     String
+  address       String?
+  paymentMethod String
+  total         Float
+  restaurantId  String
+  restaurant    Restaurant  @relation(fields: [restaurantId], references: [id])
+  items         OrderItem[]
+}

@@ -230,7 +230,8 @@ app.post('/api/v1/order', async (req: ExpressRequest, res: Response) => {
           name: i.name,
           quantity: i.quantity || 1,
           price: Number(i.price),
-          size: i.size || null,
+          variation: i.variation || null,
+          addOns: i.addOns || [],
         })),
       },
     },
@@ -245,6 +246,19 @@ app.post('/api/v1/order', async (req: ExpressRequest, res: Response) => {
     const paymentBR = customerData.paymentMethod === 'pix' ? 'Pix' :
                       customerData.paymentMethod === 'card' ? 'Cartão' : 'Dinheiro';
 
+    // Montando a lista de itens com Variações e Adicionais
+    const itemsListTxt = cart.map((i: any) => {
+      let itemLine = `- ${i.quantity || 1}x ${i.name}`;
+      if (i.variation) itemLine += ` (${i.variation})`;
+      itemLine += ` (R$ ${(Number(i.price) * (i.quantity || 1)).toFixed(2).replace('.', ',')})`;
+      
+      if (i.addOns && i.addOns.length > 0) {
+        const addOnsText = i.addOns.map((a: any) => a.name).join(', ');
+        itemLine += `\n   ↳ Adicionais: ${addOnsText}`;
+      }
+      return itemLine;
+    }).join('\n');
+
     const ownerMsg = `*NOVO PEDIDO - ${restaurant.name}*\n\n` +
                      `👤 *Cliente:* ${customerData.name}\n` +
                      `📱 *WhatsApp:* ${customerData.phone}\n` +
@@ -252,8 +266,7 @@ app.post('/api/v1/order', async (req: ExpressRequest, res: Response) => {
                      `📍 *Endereço:* ${customerData.address || 'N/A'}\n` +
                      `💳 *Pagamento:* ${paymentBR}\n` +
                      `💰 *Total:* R$ ${total.toFixed(2).replace('.', ',')}\n\n` +
-                     `🛒 *Itens:*\n` +
-                     cart.map((i: any) => `- ${i.quantity || 1}x ${i.name} (R$ ${(Number(i.price) * (i.quantity || 1)).toFixed(2).replace('.', ',')})`).join('\n');
+                     `🛒 *Itens:*\n${itemsListTxt}`;
 
     const customerMsg = `Olá, *${customerData.name}*! 👋\n\n` +
                         `Recebemos o seu pedido no valor de *R$ ${total.toFixed(2).replace('.', ',')}*.\n` +
