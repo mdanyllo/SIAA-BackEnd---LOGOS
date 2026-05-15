@@ -288,44 +288,14 @@ app.post('/api/v1/order', async (req: ExpressRequest, res: Response) => {
 
 app.get('/api/v1/siaa-admin/pdv/orders', authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
-    const restaurant = await prisma.restaurant.findUnique({
-      where: { id: req.restaurantId },
-      select: { cafeStart: true, cafeEnd: true, almocoStart: true, almocoEnd: true, jantaStart: true, jantaEnd: true }
-    });
-
-    if (!restaurant) return res.status(404).json({ error: 'Restaurante não encontrado' });
-
     const spDateStr = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
-    const currentSpTime = new Date().toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit', hour12: false });
-
-    const getBoundaryDate = (timeStr: string) => new Date(`${spDateStr}T${timeStr}:00-03:00`);
-    const currentTime = getBoundaryDate(currentSpTime);
-
-    const slots = [
-      { name: 'cafe', start: getBoundaryDate(restaurant.cafeStart), end: getBoundaryDate(restaurant.cafeEnd) },
-      { name: 'almoco', start: getBoundaryDate(restaurant.almocoStart), end: getBoundaryDate(restaurant.almocoEnd) },
-      { name: 'janta', start: getBoundaryDate(restaurant.jantaStart), end: getBoundaryDate(restaurant.jantaEnd) }
-    ];
-
-    let activeSlotStart: Date | null = null;
-    let activeSlotEnd: Date | null = null;
-
-    for (const slot of slots) {
-      if (currentTime >= slot.start && currentTime <= slot.end) {
-        activeSlotStart = slot.start;
-        activeSlotEnd = slot.end;
-        break;
-      }
-    }
-
-    if (!activeSlotStart || !activeSlotEnd) {
-      return res.json([]); // Retorna vazio se estiver fora do horário
-    }
+    const startOfDay = new Date(`${spDateStr}T00:00:00-03:00`);
+    const endOfDay = new Date(`${spDateStr}T23:59:59-03:00`);
 
     const orders = await prisma.order.findMany({
       where: { 
         restaurantId: req.restaurantId,
-        createdAt: { gte: activeSlotStart, lte: activeSlotEnd }
+        createdAt: { gte: startOfDay, lte: endOfDay }
       },
       include: { items: true },
       orderBy: { createdAt: 'desc' },
