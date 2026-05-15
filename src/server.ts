@@ -228,30 +228,58 @@ app.get('/api/v1/restaurant/:slug', async (req: ExpressRequest, res: Response) =
 
 app.post('/api/v1/order', async (req: ExpressRequest, res: Response) => {
   const { restaurantId, cart, customerData, total } = req.body;
-  const savedOrder = await prisma.order.create({
-    data: {
-      restaurantId,
-      customerName: customerData.name,
-      customerPhone: customerData.phone,
-      orderType: customerData.orderType,
-      address: customerData.address || null,
-      paymentMethod: customerData.paymentMethod,
-      total,
-      status: 'pending',
-      items: {
-        create: cart.map((i: any) => ({
-          name: i.name,
-          quantity: i.quantity || 1,
-          price: Number(i.price),
-          variation: i.variation || null,
-          addOns: i.addOns || [],
-        })),
-      },
-    },
-    include: { items: true },
-  });
 
   try {
+    // 1. VERIFICAÇÃO DE ESTOQUE FACULTATIVO/OPCIONAL
+    for (const item of cart) {
+      if (item.productId) {
+        const prod = await prisma.product.findUnique({ where: { id: item.productId } });
+        // Se o stock não for null, o controle está ativo para este produto
+        if (prod && prod.stock !== null) {
+          if (prod.stock < (item.quantity || 1)) {
+            return res.status(400).json({ error: `Estoque esgotado para o item: ${prod.name}` });
+          }
+        }
+      }
+    }
+
+    // 2. CRIAÇÃO DO PEDIDO
+    const savedOrder = await prisma.order.create({
+      data: {
+        restaurantId,
+        customerName: customerData.name,
+        customerPhone: customerData.phone,
+        orderType: customerData.orderType,
+        address: customerData.address || null,
+        paymentMethod: customerData.paymentMethod,
+        total,
+        status: 'pending',
+        items: {
+          create: cart.map((i: any) => ({
+            name: i.name,
+            quantity: i.quantity || 1,
+            price: Number(i.price),
+            variation: i.variation || null,
+            addOns: i.addOns || [],
+          })),
+        },
+      },
+      include: { items: true },
+    });
+
+    // 3. DECREMENTAR O ESTOQUE APÓS SUCESSO (SE ATIVO)
+    for (const item of cart) {
+      if (item.productId) {
+        const prod = await prisma.product.findUnique({ where: { id: item.productId } });
+        if (prod && prod.stock !== null) {
+          await prisma.product.update({
+            where: { id: item.productId },
+            data: { stock: { decrement: item.quantity || 1 } }
+          });
+        }
+      }
+    }
+
     const restaurant = await prisma.restaurant.findUnique({ where: { id: restaurantId } });
     if (!restaurant) return res.status(404).json({ error: "Restaurante inválido" });
 
@@ -259,17 +287,8 @@ app.post('/api/v1/order', async (req: ExpressRequest, res: Response) => {
     const paymentBR = customerData.paymentMethod === 'pix' ? 'Pix' :
                       customerData.paymentMethod === 'card' ? 'Cartão' : 'Dinheiro';
 
-    // Montando a lista de itens com Variações e Adicionais
     const itemsListTxt = cart.map((i: any) => {
-      let itemLine = `- ${i.quantity || 1}x ${i.name}`;
-      if (i.variation) itemLine += ` (${i.variation})`;
-      itemLine += ` (R$ ${(Number(i.price) * (i.quantity || 1)).toFixed(2).replace('.', ',')})`;
-      
-      if (i.addOns && i.addOns.length > 0) {
-        const addOnsText = i.addOns.map((a: any) => a.name).join(', ');
-        itemLine += `\n   ↳ Adicionais: ${addOnsText}`;
-      }
-      return itemLine;
+      return `- ${i.quantity || 1}x ${i.name} (R$ ${(Number(i.price) * (i.quantity || 1)).toFixed(2).replace('.', ',')})`;
     }).join('\n');
 
     const ownerMsg = `*NOVO PEDIDO - ${restaurant.name}*\n\n` +
@@ -281,7 +300,6 @@ app.post('/api/v1/order', async (req: ExpressRequest, res: Response) => {
                      `💰 *Total:* R$ ${total.toFixed(2).replace('.', ',')}\n\n` +
                      `🛒 *Itens:*\n${itemsListTxt}`;
 
-    // MENSAGEM DO CLIENTE DETALHADA E COM O TEMPO DE ENTREGA
     const customerMsg = `Olá, *${customerData.name}*! 👋\n\n` +
                         `Recebemos o seu pedido com sucesso! 🎉\n\n` +
                         `🛒 *Seu Pedido:*\n${itemsListTxt}\n\n` +
@@ -301,7 +319,7 @@ app.post('/api/v1/order', async (req: ExpressRequest, res: Response) => {
   } catch (error) {
     res.status(500).json({ error: "Falha ao processar pedido" });
   }
-});
+}); 
 
 app.get('/api/v1/siaa-admin/pdv/orders', authenticateToken, async (req: AuthRequest, res: Response) => {
   try {

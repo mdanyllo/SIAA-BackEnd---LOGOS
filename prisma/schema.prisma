@@ -53,6 +53,7 @@ model Product {
   category     String     // "prato" ou "bebida"
   available    Boolean    @default(false)
   timeSlot     String     @default("almoco")
+  stock        Int?
   restaurant   Restaurant @relation(fields: [restaurantId], references: [id])
   restaurantId String
 }
