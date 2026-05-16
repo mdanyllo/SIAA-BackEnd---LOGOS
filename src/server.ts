@@ -415,6 +415,27 @@ app.post('/api/v1/siaa-admin/register', async (req: ExpressRequest, res: Respons
   }
 });
 
+app.get('/api/v1/siaa-admin/whatsapp/status', authenticateToken, async (req: AuthRequest, res: Response) => {
+  try {
+    const restaurant = await prisma.restaurant.findUnique({ where: { id: req.restaurantId } });
+    if (!restaurant) return res.status(404).json({ error: "Não encontrado" });
+
+    const response = await fetch(`${evolutionBaseUrl}/instance/fetchInstances`, {
+      method: 'GET',
+      headers: { 'apikey': restaurant.evolutionApiKey }
+    });
+    const data = await response.json();
+    // A Evolution API retorna um array; busca a instância pelo nome
+    const instance = Array.isArray(data)
+      ? data.find((i: any) => i.instance?.instanceName === restaurant.evolutionInstance)
+      : data;
+    const state = instance?.instance?.state || instance?.state || 'unknown';
+    res.json({ connected: state === 'open', state });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.get('/api/v1/siaa-admin/whatsapp/connect', authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
     const restaurant = await prisma.restaurant.findUnique({ where: { id: req.restaurantId } });

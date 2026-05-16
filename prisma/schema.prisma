@@ -32,8 +32,12 @@ model Restaurant {
   jantaEnd          String   @default("22:00")
 
   deliveryFee       Float    @default(5.00)
+  deliveryZones     Json?    @default("[]") // Ex: [{"neighborhood":"Centro","fee":5.00}]
+  cardFeeDebit      Float?   // Taxa % para débito (ex: 1.5 = 1,5%)
+  cardFeeCredit     Float?   // Taxa % para crédito (ex: 3.0 = 3,0%)
+  operatingDays     String   @default("1,2,3,4,5,6,0") // 0=Dom,1=Seg,...,6=Sab
   whatsapp          String?
-  // Configurações da Evolution API (Privado)
+ 
   evolutionInstance String   @unique 
   evolutionApiKey   String
   
