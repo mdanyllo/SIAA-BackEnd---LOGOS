@@ -395,42 +395,34 @@ app.post('/api/v1/siaa-admin/register', async (req: ExpressRequest, res: Respons
       data: { name, slug, email, password: hashedPassword, evolutionInstance: uniqueInstanceName, evolutionApiKey: 'pending' }
     });
 
-    try {
-      const evoRes = await fetch(`${evolutionBaseUrl}/instance/create`, {
-        method: 'POST',
-        headers: { 'apikey': process.env.EVOLUTION_GLOBAL_KEY as string, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ instanceName: uniqueInstanceName, qrcode: true, integration: "WHATSAPP-BAILEYS" })
-      });
-
-      const evoData = await evoRes.json();
-      const apiKey = evoData?.hash?.apikey || evoData?.instance?.apikey || process.env.EVOLUTION_GLOBAL_KEY;
-
-      await prisma.restaurant.update({ where: { id: newRestaurant.id }, data: { evolutionApiKey: apiKey } });
-    } catch (evoErr: any) {
-      console.error("Erro na criação remota:", evoErr.message);
-    }
-    res.status(201).json({ message: "Sucesso" });
-  } catch (error: any) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.get('/api/v1/siaa-admin/whatsapp/status', authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
-    const restaurant = await prisma.restaurant.findUnique({ where: { id: req.restaurantId } });
-    if (!restaurant) return res.status(404).json({ error: "Não encontrado" });
-
-    const response = await fetch(`${evolutionBaseUrl}/instance/fetchInstances`, {
-      method: 'GET',
-      headers: { 'apikey': restaurant.evolutionApiKey }
+    const evoRes = await fetch(`${evolutionBaseUrl}/instance/create`, {
+      method: 'POST',
+      headers: { 'apikey': process.env.EVOLUTION_GLOBAL_KEY as string, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ instanceName: uniqueInstanceName, qrcode: true, integration: "WHATSAPP-BAILEYS" })
     });
-    const data = await response.json();
-    // A Evolution API retorna um array; busca a instância pelo nome
-    const instance = Array.isArray(data)
-      ? data.find((i: any) => i.instance?.instanceName === restaurant.evolutionInstance)
-      : data;
-    const state = instance?.instance?.state || instance?.state || 'unknown';
-    res.json({ connected: state === 'open', state });
+
+    const evoData = await evoRes.json();
+    const apiKey = evoData?.hash?.apikey || evoData?.instance?.apikey || process.env.EVOLUTION_GLOBAL_KEY;
+
+    await prisma.restaurant.update({ where: { id: newRestaurant.id }, data: { evolutionApiKey: apiKey } });
+
+    // Desabilita eventos desnecessários automaticamente
+    await fetch(`${evolutionBaseUrl}/webhook/set/${uniqueInstanceName}`, {
+      method: 'POST',
+      headers: { 'apikey': apiKey as string, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        webhook: {
+          enabled: false,
+          url: "",
+          events: []
+        }
+      })
+    });
+  } catch (evoErr: any) {
+    console.error("Erro na criação remota:", evoErr.message);
+  }
+    res.status(201).json({ message: "Sucesso" });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
@@ -493,6 +485,23 @@ app.post('/api/v1/siaa-admin/products', authenticateToken, async (req: AuthReque
     }));
   } catch (error) {
     res.status(500).json({ error: "Erro" });
+  }
+});
+
+app.put('/api/v1/siaa-admin/products/reorder', authenticateToken, async (req: AuthRequest, res: Response) => {
+  try {
+    const { order } = req.body;
+    await Promise.all(
+      order.map((item: { id: string; order: number }) =>
+        prisma.product.update({
+          where: { id: item.id },
+          data: { order: item.order },
+        })
+      )
+    );
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: 'Erro ao reordenar produtos' });
   }
 });
 

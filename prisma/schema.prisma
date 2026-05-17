@@ -31,6 +31,7 @@ model Restaurant {
   jantaStart        String   @default("18:00")
   jantaEnd          String   @default("22:00")
 
+  categories        Json?    @default("[]") // Ex: [{"id":"uuid","name":"Promoções 🔥","order":0}]
   deliveryFee       Float    @default(5.00)
   deliveryZones     Json?    @default("[]") // Ex: [{"neighborhood":"Centro","fee":5.00}]
   cardFeeDebit      Float?   // Taxa % para débito (ex: 1.5 = 1,5%)
@@ -58,6 +59,7 @@ model Product {
   available    Boolean    @default(false)
   timeSlot     String     @default("almoco")
   stock        Int?
+  order        Int?       @default(0)
   restaurant   Restaurant @relation(fields: [restaurantId], references: [id])
   restaurantId String
 }
