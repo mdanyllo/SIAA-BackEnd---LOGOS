@@ -63,6 +63,9 @@ model Restaurant {
   evolutionInstance String      @unique
   evolutionApiKey   String
 
+  openedToday       Boolean     @default(false)
+  closedToday       Boolean     @default(false)
+
   admin             AdminUser?
   products          Product[]
   orders            Order[]
@@ -95,6 +98,7 @@ model Order {
   orderType     String
   address       String?
   paymentMethod String
+  changeFor     Float?
   total         Float
   restaurant    Restaurant  @relation(fields: [restaurantId], references: [id])
   restaurantId  String
@@ -167,6 +171,7 @@ model StoreOrder {
   orderType     String
   address       String?
   paymentMethod String
+  changeFor     Float?
   total         Float
   store         Store            @relation(fields: [storeId], references: [id])
   storeId       String

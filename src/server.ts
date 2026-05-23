@@ -107,15 +107,38 @@ const sendWhatsAppMessage = async (
 // ============================================================================
 // 🔄 ROTINA: ABERTURA, TURNOS E FECHAMENTO DE CAIXA (RODA A CADA 1 MINUTO)
 // ============================================================================
-setInterval(async () => {
+app.post('/cron/fechamento', async (req, res) => {
+  // 🔐 proteção via variável de ambiente
+  const cronSecret = process.env.CRON_SECRET;
+  if (!cronSecret || req.headers.authorization !== `Bearer ${cronSecret}`) {
+    return res.status(403).json({ error: "forbidden" });
+  }
+
   try {
     const now = new Date();
-    const spTimeOpts: Intl.DateTimeFormatOptions = { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit', hour12: false };
+
+    const spTimeOpts: Intl.DateTimeFormatOptions = {
+      timeZone: 'America/Sao_Paulo',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false
+    };
+
     const currentTime = now.toLocaleTimeString('pt-BR', spTimeOpts);
 
-    // 1. ROTINA DE ABERTURA: Reativa os pratos automaticamente no horário de abertura do restaurante
+    const spDateStr = now.toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
+
+    const startOfDay = new Date(`${spDateStr}T00:00:00-03:00`);
+    const endOfDay   = new Date(`${spDateStr}T23:59:59-03:00`);
+
+    // =========================
+    // 🟢 ABERTURA
+    // =========================
     const openingRestaurants = await prisma.restaurant.findMany({
-      where: { openTime: currentTime }
+      where: {
+        openTime: { lte: currentTime },
+        openedToday: false
+      }
     });
 
     for (const restaurant of openingRestaurants) {
@@ -123,25 +146,35 @@ setInterval(async () => {
         where: { restaurantId: restaurant.id, category: 'prato' },
         data: { available: true }
       });
+
+      await prisma.restaurant.update({
+        where: { id: restaurant.id },
+        data: { openedToday: true, closedToday: false }
+      });
     }
 
-    // 2. ROTINA DE FECHAMENTO: Oculta os pratos e gera o Relatório de Caixa
+    // =========================
+    // 🔴 FECHAMENTO
+    // =========================
     const closingRestaurants = await prisma.restaurant.findMany({
-      where: { closeTime: currentTime }
+      where: {
+        closeTime: { lte: currentTime },
+        closedToday: false
+      }
     });
 
     for (const restaurant of closingRestaurants) {
-      // Oculta pratos do cardápio
+
+      // 🔻 Oculta pratos
       await prisma.product.updateMany({
         where: { restaurantId: restaurant.id, category: 'prato' },
         data: { available: false }
       });
 
-      // Fechamento de Caixa (Relatório WhatsApp)
+      // =========================
+      // 📊 RELATÓRIO (igual ao seu)
+      // =========================
       if (restaurant.whatsapp) {
-        const spDateStr = now.toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
-        const startOfDay = new Date(`${spDateStr}T00:00:00-03:00`);
-        const endOfDay = new Date(`${spDateStr}T23:59:59-03:00`);
 
         const dailyOrders = await prisma.order.findMany({
           where: {
@@ -151,8 +184,8 @@ setInterval(async () => {
         });
 
         let faturamento = { cafe: 0, almoco: 0, janta: 0, outros: 0 };
-        let qtdPedidos = { cafe: 0, almoco: 0, janta: 0, outros: 0 };
-        let totalGeral = 0;
+        let qtdPedidos  = { cafe: 0, almoco: 0, janta: 0, outros: 0 };
+        let totalGeral  = 0;
 
         const timeToMinutes = (t: string) => {
           const [h, m] = t.split(':').map(Number);
@@ -160,12 +193,12 @@ setInterval(async () => {
         };
 
         const limites = {
-          cafe: [timeToMinutes(restaurant.cafeStart), timeToMinutes(restaurant.cafeEnd)],
+          cafe:   [timeToMinutes(restaurant.cafeStart),   timeToMinutes(restaurant.cafeEnd)],
           almoco: [timeToMinutes(restaurant.almocoStart), timeToMinutes(restaurant.almocoEnd)],
-          janta: [timeToMinutes(restaurant.jantaStart), timeToMinutes(restaurant.jantaEnd)]
+          janta:  [timeToMinutes(restaurant.jantaStart),  timeToMinutes(restaurant.jantaEnd)]
         };
 
-        dailyOrders.forEach((order: { createdAt: string | number | Date; total: number; }) => {
+        dailyOrders.forEach((order: any) => {
           const orderTimeStr = new Date(order.createdAt).toLocaleTimeString('pt-BR', spTimeOpts);
           const orderMins = timeToMinutes(orderTimeStr);
 
@@ -178,29 +211,59 @@ setInterval(async () => {
           } else {
             faturamento.outros += order.total; qtdPedidos.outros++;
           }
+
           totalGeral += order.total;
         });
 
-        const reportMsg = `📊 *FECHAMENTO DE CAIXA DIÁRIO* 📊\n` +
-                          `Restaurante: *${restaurant.name}*\n` +
-                          `Data: ${now.toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' })}\n\n` +
-                          `☕ *Café da Manhã:*\n` +
-                          `Pedidos: ${qtdPedidos.cafe} | Faturamento: R$ ${faturamento.cafe.toFixed(2).replace('.', ',')}\n\n` +
-                          `🍛 *Almoço:*\n` +
-                          `Pedidos: ${qtdPedidos.almoco} | Faturamento: R$ ${faturamento.almoco.toFixed(2).replace('.', ',')}\n\n` +
-                          `🌙 *Jantar:*\n` +
-                          `Pedidos: ${qtdPedidos.janta} | Faturamento: R$ ${faturamento.janta.toFixed(2).replace('.', ',')}\n\n` +
-                          (qtdPedidos.outros > 0 ? `🕑 *Fora de Hora:* R$ ${faturamento.outros.toFixed(2).replace('.', ',')}\n\n` : '') +
-                          `💵 *TOTAL GERAL:* R$ ${totalGeral.toFixed(2).replace('.', ',')} (${dailyOrders.length} pedidos)\n\n` +
-                          `_Operação encerrada. Bom descanso!_ 🚀`;
+        const reportMsg =
+          `📊 *FECHAMENTO DE CAIXA DIÁRIO* 📊\n` +
+          `Restaurante: *${restaurant.name}*\n` +
+          `Data: ${now.toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' })}\n\n` +
+          `☕ *Café da Manhã:*\nPedidos: ${qtdPedidos.cafe} | R$ ${faturamento.cafe.toFixed(2).replace('.', ',')}\n\n` +
+          `🍛 *Almoço:*\nPedidos: ${qtdPedidos.almoco} | R$ ${faturamento.almoco.toFixed(2).replace('.', ',')}\n\n` +
+          `🌙 *Jantar:*\nPedidos: ${qtdPedidos.janta} | R$ ${faturamento.janta.toFixed(2).replace('.', ',')}\n\n` +
+          (qtdPedidos.outros > 0 ? `🕑 Fora de Hora: R$ ${faturamento.outros.toFixed(2).replace('.', ',')}\n\n` : '') +
+          `💵 *TOTAL:* R$ ${totalGeral.toFixed(2).replace('.', ',')} (${dailyOrders.length} pedidos)\n\n` +
+          `_Operação encerrada._ 🚀`;
 
         await sendWhatsAppMessage(restaurant, restaurant.whatsapp, reportMsg);
       }
+
+      // 🔒 marca como fechado
+      await prisma.restaurant.update({
+        where: { id: restaurant.id },
+        data: { closedToday: true }
+      });
     }
+
+    res.json({ success: true });
+
   } catch (error) {
-    console.error("Erro na rotina de fechamento de caixa:", error);
+    console.error("Erro no cron:", error);
+    res.status(500).json({ error: "erro cron" });
   }
-}, 60000);
+});
+
+// ============================================================================
+// 🔄 CRON RESET: Zera flags de abertura/fechamento à meia-noite (00:00)
+// ============================================================================
+app.post('/cron/reset', async (req, res) => {
+  const cronSecret = process.env.CRON_SECRET;
+  if (!cronSecret || req.headers.authorization !== `Bearer ${cronSecret}`) {
+    return res.status(403).json({ error: "forbidden" });
+  }
+
+  try {
+    await prisma.restaurant.updateMany({
+      data: { openedToday: false, closedToday: false }
+    });
+    console.log("[SIAA] 🔄 Reset diário de openedToday/closedToday executado.");
+    res.json({ success: true });
+  } catch (error) {
+    console.error("Erro no cron/reset:", error);
+    res.status(500).json({ error: "erro cron/reset" });
+  }
+});
 
 // ============================================================================
 // 🚀 ENDPOINTS DA API
@@ -259,6 +322,9 @@ app.post('/api/v1/order', async (req: ExpressRequest, res: Response) => {
         orderType: customerData.orderType,
         address: customerData.address || null,
         paymentMethod: customerData.paymentMethod,
+        changeFor: (customerData.paymentMethod === 'money' || customerData.paymentMethod === 'cash') && customerData.changeFor
+          ? Number(customerData.changeFor)
+          : null,
         total,
         status: 'pending',
         items: {
@@ -294,6 +360,13 @@ app.post('/api/v1/order', async (req: ExpressRequest, res: Response) => {
     const paymentBR = customerData.paymentMethod === 'pix' ? 'Pix' :
                       customerData.paymentMethod === 'card' ? 'Cartão' : 'Dinheiro';
 
+    const changeForNum = customerData.changeFor ? Number(customerData.changeFor) : null;
+    const changeLine = (customerData.paymentMethod === 'money' || customerData.paymentMethod === 'cash')
+      ? changeForNum
+        ? `\n💵 *Troco para:* R$ ${changeForNum.toFixed(2).replace('.', ',')} (devolve R$ ${Math.max(0, changeForNum - total).toFixed(2).replace('.', ',')})`
+        : `\n💵 *Troco:* Não precisa`
+      : '';
+
     const itemsListTxt = cart.map((i: any) => {
       return `- ${i.quantity || 1}x ${i.name} (R$ ${(Number(i.price) * (i.quantity || 1)).toFixed(2).replace('.', ',')})`;
     }).join('\n');
@@ -303,7 +376,7 @@ app.post('/api/v1/order', async (req: ExpressRequest, res: Response) => {
                      `📱 *WhatsApp:* ${customerData.phone}\n` +
                      `📦 *Tipo:* ${orderTypeBR}\n` +
                      `📍 *Endereço:* ${customerData.address || 'N/A'}\n` +
-                     `💳 *Pagamento:* ${paymentBR}\n` +
+                     `💳 *Pagamento:* ${paymentBR}${changeLine}\n` +
                      `💰 *Total:* R$ ${total.toFixed(2).replace('.', ',')}\n\n` +
                      `🛒 *Itens:*\n${itemsListTxt}`;
 
