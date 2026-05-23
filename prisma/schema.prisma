@@ -8,71 +8,82 @@ generator client {
   provider = "prisma-client-js"
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// AUTH CENTRAL
+// ─────────────────────────────────────────────────────────────────────────────
+model AdminUser {
+  id           String      @id @default(uuid())
+  email        String      @unique
+  password     String
+  segment      String      // "restaurant" | "retail" | "service"
+
+  restaurantId String?     @unique
+  storeId      String?     @unique
+  serviceId    String?     @unique
+
+  restaurant   Restaurant? @relation(fields: [restaurantId], references: [id])
+  store        Store?      @relation(fields: [storeId], references: [id])
+  service      Service?    @relation(fields: [serviceId], references: [id])
+
+  createdAt    DateTime    @default(now())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SEGMENTO 1: RESTAURANTE — nomes originais, zero risco de migration de dados
+// ─────────────────────────────────────────────────────────────────────────────
 model Restaurant {
-  id                String   @id @default(uuid())
-  slug              String   @unique // Identificador na URL: logos.com/marmitaria-do-chef
-  email             String   @unique
-  password          String
+  id                String      @id @default(uuid())
+  slug              String      @unique
   name              String
-  logo              String?  @default("ChefHat")
+  logo              String?     @default("ChefHat")
   bannerImage       String?
   bannerTitle       String?
   bannerSubtitle    String?
-  openTime          String   @default("11:00")
-  closeTime         String   @default("21:00")
-  cutoffHour        Int      @default(14)
-  cutoffMinute      Int      @default(30)
+  openTime          String      @default("11:00")
+  closeTime         String      @default("21:00")
+  cutoffHour        Int         @default(14)
+  cutoffMinute      Int         @default(30)
   pixKey            String?
-
-  cafeStart         String   @default("06:00")
-  cafeEnd           String   @default("10:00")
-  almocoStart       String   @default("11:00")
-  almocoEnd         String   @default("15:00")
-  jantaStart        String   @default("18:00")
-  jantaEnd          String   @default("22:00")
-
-  categories        Json?    @default("[]") // Ex: [{"id":"uuid","name":"Promoções 🔥","order":0}]
-  deliveryFee       Float    @default(5.00)
-  deliveryZones     Json?    @default("[]") // Ex: [{"neighborhood":"Centro","fee":5.00}]
-  cardFeeDebit      Float?   // Taxa % para débito (ex: 1.5 = 1,5%)
-  cardFeeCredit     Float?   // Taxa % para crédito (ex: 3.0 = 3,0%)
-  operatingDays     String   @default("1,2,3,4,5,6,0") // 0=Dom,1=Seg,...,6=Sab
   whatsapp          String?
- 
-  evolutionInstance String   @unique 
+
+  cafeStart         String      @default("06:00")
+  cafeEnd           String      @default("10:00")
+  almocoStart       String      @default("11:00")
+  almocoEnd         String      @default("15:00")
+  jantaStart        String      @default("18:00")
+  jantaEnd          String      @default("22:00")
+
+  categories        Json?       @default("[]")
+  deliveryFee       Float       @default(5.00)
+  deliveryZones     Json?       @default("[]")
+  cardFeeDebit      Float?
+  cardFeeCredit     Float?
+  operatingDays     String      @default("1,2,3,4,5,6,0")
+
+  evolutionInstance String      @unique
   evolutionApiKey   String
-  
+
+  admin             AdminUser?
   products          Product[]
   orders            Order[]
-  createdAt         DateTime @default(now())
+  createdAt         DateTime    @default(now())
 }
 
 model Product {
   id           String     @id @default(uuid())
   name         String
   description  String?
-  price        Float      @default(0) // Preço base
-  variations   Json?      @default("[]") // Ex: [{"name": "Média", "price": 15}]
-  addOns       Json?      @default("[]") // Ex: [{"name": "Bacon", "price": 3}]
+  price        Float      @default(0)
+  variations   Json?      @default("[]")
+  addOns       Json?      @default("[]")
   image        String?
-  category     String     // "prato" ou "bebida"
+  category     String
   available    Boolean    @default(false)
   timeSlot     String     @default("almoco")
   stock        Int?
   order        Int?       @default(0)
   restaurant   Restaurant @relation(fields: [restaurantId], references: [id])
   restaurantId String
-}
-
-model OrderItem {
-  id        String  @id @default(cuid())
-  name      String
-  quantity  Int
-  price     Float
-  variation String? // Nome da variação escolhida (se houver)
-  addOns    Json?   // Array com os adicionais escolhidos
-  orderId   String
-  order     Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
 }
 
 model Order {
@@ -85,7 +96,155 @@ model Order {
   address       String?
   paymentMethod String
   total         Float
-  restaurantId  String
   restaurant    Restaurant  @relation(fields: [restaurantId], references: [id])
+  restaurantId  String
   items         OrderItem[]
+}
+
+model OrderItem {
+  id        String  @id @default(cuid())
+  name      String
+  quantity  Int
+  price     Float
+  variation String?
+  addOns    Json?
+  order     Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  orderId   String
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SEGMENTO 2: LOJA / VAREJO
+// ─────────────────────────────────────────────────────────────────────────────
+model Store {
+  id                String         @id @default(uuid())
+  slug              String         @unique
+  name              String
+  logo              String?
+  bannerImage       String?
+  bannerTitle       String?
+  bannerSubtitle    String?
+  whatsapp          String?
+  pixKey            String?
+  cardFeeDebit      Float?
+  cardFeeCredit     Float?
+  operatingDays     String         @default("1,2,3,4,5,6,0")
+  openTime          String         @default("09:00")
+  closeTime         String         @default("18:00")
+  deliveryFee       Float          @default(0)
+  deliveryZones     Json?          @default("[]")
+  categories        Json?          @default("[]")
+  evolutionInstance String         @unique
+  evolutionApiKey   String
+
+  admin             AdminUser?
+  products          StoreProduct[]
+  orders            StoreOrder[]
+  createdAt         DateTime       @default(now())
+}
+
+model StoreProduct {
+  id           String  @id @default(uuid())
+  name         String
+  description  String?
+  price        Float   @default(0)
+  variations   Json?   @default("[]")
+  addOns       Json?   @default("[]")
+  image        String?
+  category     String
+  available    Boolean @default(false)
+  stock        Int?
+  order        Int?    @default(0)
+  store        Store   @relation(fields: [storeId], references: [id])
+  storeId      String
+}
+
+model StoreOrder {
+  id            String           @id @default(cuid())
+  createdAt     DateTime         @default(now())
+  status        String           @default("pending")
+  customerName  String
+  customerPhone String
+  orderType     String
+  address       String?
+  paymentMethod String
+  total         Float
+  store         Store            @relation(fields: [storeId], references: [id])
+  storeId       String
+  items         StoreOrderItem[]
+}
+
+model StoreOrderItem {
+  id        String     @id @default(cuid())
+  name      String
+  quantity  Int
+  price     Float
+  variation String?
+  addOns    Json?
+  order     StoreOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  orderId   String
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SEGMENTO 3: SERVIÇOS / AGENDAMENTOS
+// ─────────────────────────────────────────────────────────────────────────────
+model Service {
+  id                String           @id @default(uuid())
+  slug              String           @unique
+  name              String
+  logo              String?
+  bannerImage       String?
+  bannerTitle       String?
+  bannerSubtitle    String?
+  whatsapp          String?
+  pixKey            String?
+  operatingDays     String           @default("1,2,3,4,5,6")
+  openTime          String           @default("09:00")
+  closeTime         String           @default("19:00")
+  slotDuration      Int              @default(30)
+  categories        Json?            @default("[]")
+  evolutionInstance String           @unique
+  evolutionApiKey   String
+
+  admin             AdminUser?
+  products          ServiceProduct[]
+  appointments      Appointment[]
+  createdAt         DateTime         @default(now())
+}
+
+model ServiceProduct {
+  id          String  @id @default(uuid())
+  name        String
+  description String?
+  price       Float   @default(0)
+  durationMin Int     @default(30)
+  image       String?
+  category    String
+  available   Boolean @default(true)
+  order       Int?    @default(0)
+  service     Service @relation(fields: [serviceId], references: [id])
+  serviceId   String
+}
+
+model Appointment {
+  id            String            @id @default(cuid())
+  createdAt     DateTime          @default(now())
+  scheduledAt   DateTime
+  status        String            @default("pending")
+  customerName  String
+  customerPhone String
+  paymentMethod String
+  total         Float
+  service       Service           @relation(fields: [serviceId], references: [id])
+  serviceId     String
+  items         AppointmentItem[]
+}
+
+model AppointmentItem {
+  id            String      @id @default(cuid())
+  name          String
+  quantity      Int
+  price         Float
+  variation     String?
+  appointment   Appointment @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
+  appointmentId String
 }

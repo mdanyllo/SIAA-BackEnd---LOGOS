@@ -36,21 +36,27 @@ const evolutionBaseUrl = process.env.EVOLUTION_URL?.replace(/\/$/, '');
 
 interface AuthRequest extends ExpressRequest {
   restaurantId?: string;
+  segment?: string;
 }
 
 const authenticateToken = (req: AuthRequest, res: Response, next: NextFunction) => {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
-
-  if (!token) return res.status(401).json({ error: "Acesso negado." });
-
-  jwt.verify(token, JWT_SECRET, (err: any, decoded: any) => {
-    if (err) return res.status(403).json({ error: "Token inválido ou expirado." });
-    req.restaurantId = decoded.id;
+  const auth = req.headers['authorization'];
+  if (!auth?.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Acesso negado.' });
+  }
+  try {
+    const payload = jwt.verify(auth.slice(7), JWT_SECRET) as {
+      adminId: string;
+      establishmentId: string;
+      segment: string;
+    };
+    req.restaurantId = payload.establishmentId;
+    req.segment      = payload.segment;
     next();
-  });
+  } catch {
+    return res.status(403).json({ error: 'Token inválido ou expirado.' });
+  }
 };
-
 // ============================================================================
 // 📱 FUNÇÃO GLOBAL: ENVIO DE WHATSAPP (CLIENTE E DONO)
 // ============================================================================
@@ -159,7 +165,7 @@ setInterval(async () => {
           janta: [timeToMinutes(restaurant.jantaStart), timeToMinutes(restaurant.jantaEnd)]
         };
 
-        dailyOrders.forEach(order => {
+        dailyOrders.forEach((order: { createdAt: string | number | Date; total: number; }) => {
           const orderTimeStr = new Date(order.createdAt).toLocaleTimeString('pt-BR', spTimeOpts);
           const orderMins = timeToMinutes(orderTimeStr);
 
@@ -217,9 +223,10 @@ app.get('/api/v1/restaurant/:slug', async (req: ExpressRequest, res: Response) =
       include: { products: true }
     });
 
-    if (!restaurant) return res.status(404).json({ error: "Restaurante não encontrado" });
+    if (!restaurant) return res.status(404).json({ error: "Estabelecimento não encontrado" });
 
-    const { evolutionApiKey, evolutionInstance, password, email, ...publicData } = restaurant;
+    // Remove campos sensíveis antes de enviar para o público
+    const { evolutionApiKey, evolutionInstance, ...publicData } = restaurant;
     res.json(publicData);
   } catch (error) {
     res.status(500).json({ error: "Erro interno no servidor" });
@@ -386,48 +393,98 @@ app.patch('/api/v1/siaa-admin/pdv/orders/:orderId/status', authenticateToken, as
 });
 
 app.post('/api/v1/siaa-admin/register', async (req: ExpressRequest, res: Response) => {
-  const { name, slug, email, password } = req.body;
+  const { name, slug, email, password, segment } = req.body;
+ 
+  if (!['restaurant', 'retail', 'service'].includes(segment)) {
+    return res.status(400).json({ error: 'Segmento inválido.' });
+  }
+ 
   try {
     const hashedPassword = await bcrypt.hash(password, 10);
     const uniqueInstanceName = `logos_${slug}_${Date.now().toString().slice(-4)}`;
-
-    const newRestaurant = await prisma.restaurant.create({
-      data: { name, slug, email, password: hashedPassword, evolutionInstance: uniqueInstanceName, evolutionApiKey: 'pending' }
+ 
+    // ── Campos base de Evolution (iguais pra todos) ──
+    const evoBase = {
+      evolutionInstance: uniqueInstanceName,
+      evolutionApiKey: 'pending',
+    };
+ 
+    // ── 1. Cria o estabelecimento no model correto ──
+    let establishmentId: string;
+ 
+    if (segment === 'restaurant') {
+      const r = await prisma.restaurant.create({ data: { name, slug, ...evoBase } });
+      establishmentId = r.id;
+    } else if (segment === 'retail') {
+      const s = await prisma.store.create({ data: { name, slug, ...evoBase } });
+      establishmentId = s.id;
+    } else {
+      // service
+      const sv = await prisma.service.create({ data: { name, slug, ...evoBase } });
+      establishmentId = sv.id;
+    }
+ 
+    // ── 2. Cria o AdminUser vinculado ──
+    await prisma.adminUser.create({
+      data: {
+        email,
+        password: hashedPassword,
+        segment,
+        // Só preenche a FK do segmento correto
+        ...(segment === 'restaurant' && { restaurantId: establishmentId }),
+        ...(segment === 'retail'     && { storeId:      establishmentId }),
+        ...(segment === 'service'    && { serviceId:    establishmentId }),
+      }
     });
-
-  try {
-    const evoRes = await fetch(`${evolutionBaseUrl}/instance/create`, {
-      method: 'POST',
-      headers: { 'apikey': process.env.EVOLUTION_GLOBAL_KEY as string, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ instanceName: uniqueInstanceName, qrcode: true, integration: "WHATSAPP-BAILEYS" })
-    });
-
-    const evoData = await evoRes.json();
-    const apiKey = evoData?.hash?.apikey || evoData?.instance?.apikey || process.env.EVOLUTION_GLOBAL_KEY;
-
-    await prisma.restaurant.update({ where: { id: newRestaurant.id }, data: { evolutionApiKey: apiKey } });
-
-    // Desabilita eventos desnecessários automaticamente
-    await fetch(`${evolutionBaseUrl}/webhook/set/${uniqueInstanceName}`, {
-      method: 'POST',
-      headers: { 'apikey': apiKey as string, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        webhook: {
-          enabled: false,
-          url: "",
-          events: []
-        }
-      })
-    });
-  } catch (evoErr: any) {
-    console.error("Erro na criação remota:", evoErr.message);
-  }
-    res.status(201).json({ message: "Sucesso" });
+ 
+    // ── 3. Cria a instância Evolution (best-effort) ──
+    try {
+      const evoRes = await fetch(`${evolutionBaseUrl}/instance/create`, {
+        method: 'POST',
+        headers: {
+          'apikey': process.env.EVOLUTION_GLOBAL_KEY as string,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          instanceName: uniqueInstanceName,
+          qrcode: true,
+          integration: 'WHATSAPP-BAILEYS'
+        })
+      });
+ 
+      const evoData = await evoRes.json();
+      const apiKey = evoData?.hash?.apikey
+        || evoData?.instance?.apikey
+        || process.env.EVOLUTION_GLOBAL_KEY;
+ 
+      // Atualiza a apiKey no model correto
+      if (segment === 'restaurant') {
+        await prisma.restaurant.update({ where: { slug }, data: { evolutionApiKey: apiKey } });
+      } else if (segment === 'retail') {
+        await prisma.store.update({ where: { slug }, data: { evolutionApiKey: apiKey } });
+      } else {
+        await prisma.service.update({ where: { slug }, data: { evolutionApiKey: apiKey } });
+      }
+ 
+      // Desativa webhook
+      await fetch(`${evolutionBaseUrl}/webhook/set/${uniqueInstanceName}`, {
+        method: 'POST',
+        headers: { 'apikey': apiKey as string, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ webhook: { enabled: false, url: '', events: [] } })
+      });
+    } catch (evoErr: any) {
+      console.error('Erro Evolution (não crítico):', evoErr.message);
+    }
+ 
+    res.status(201).json({ message: 'Cliente criado com sucesso.' });
   } catch (error: any) {
+    if (error.code === 'P2002') {
+      return res.status(409).json({ error: 'E-mail ou slug já cadastrado.' });
+    }
     res.status(500).json({ error: error.message });
   }
 });
-
+  
 app.get('/api/v1/siaa-admin/whatsapp/connect', authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
     const restaurant = await prisma.restaurant.findUnique({ where: { id: req.restaurantId } });
@@ -446,12 +503,35 @@ app.get('/api/v1/siaa-admin/whatsapp/connect', authenticateToken, async (req: Au
 
 app.post('/api/v1/siaa-admin/login', async (req: ExpressRequest, res: Response) => {
   const { email, password } = req.body;
+ 
   try {
-    const restaurant = await prisma.restaurant.findUnique({ where: { email } });
-    if (!restaurant || !(await bcrypt.compare(password, restaurant.password))) return res.status(401).json({ error: "Inválido" });
-    res.json({ token: jwt.sign({ id: restaurant.id, slug: restaurant.slug }, JWT_SECRET, { expiresIn: '24h' }), restaurantId: restaurant.id, slug: restaurant.slug });
+    const user = await prisma.adminUser.findUnique({ where: { email } });
+ 
+    if (!user || !(await bcrypt.compare(password, user.password))) {
+      return res.status(401).json({ error: 'E-mail ou senha inválidos.' });
+    }
+ 
+    // O ID do estabelecimento varia conforme o segment
+    const establishmentId =
+      user.restaurantId ?? user.storeId ?? user.serviceId ?? '';
+ 
+    const token = jwt.sign(
+      {
+        adminId:         user.id,
+        establishmentId, // ID do restaurante / loja / serviço
+        segment:         user.segment,
+      },
+      JWT_SECRET,
+      { expiresIn: '24h' }
+    );
+ 
+    res.json({
+      token,
+      segment:         user.segment,
+      establishmentId,
+    });
   } catch (error) {
-    res.status(500).json({ error: "Erro" });
+    res.status(500).json({ error: 'Erro interno.' });
   }
 });
 
@@ -459,8 +539,7 @@ app.get('/api/v1/siaa-admin/me', authenticateToken, async (req: AuthRequest, res
   try {
     const restaurant = await prisma.restaurant.findUnique({ where: { id: req.restaurantId }, include: { products: true } });
     if (!restaurant) return res.status(404).json({ error: "Não encontrado" });
-    const { password, ...safeData } = restaurant;
-    res.json(safeData);
+    res.json(restaurant);
   } catch (error) {
     res.status(500).json({ error: "Erro" });
   }
