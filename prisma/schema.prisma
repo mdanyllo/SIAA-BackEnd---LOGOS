@@ -66,6 +66,8 @@ model Restaurant {
   openedToday       Boolean     @default(false)
   closedToday       Boolean     @default(false)
 
+  isPaused          Boolean     @default(false)
+
   admin             AdminUser?
   products          Product[]
   orders            Order[]
@@ -103,6 +105,7 @@ model Order {
   restaurant    Restaurant  @relation(fields: [restaurantId], references: [id])
   restaurantId  String
   items         OrderItem[]
+  
 }
 
 model OrderItem {

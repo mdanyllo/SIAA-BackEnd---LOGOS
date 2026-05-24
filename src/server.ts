@@ -73,8 +73,6 @@ const sendWhatsAppMessage = async (
   if (numeroLimpo.length === 10) numeroLimpo = `${numeroLimpo.substring(0, 2)}9${numeroLimpo.substring(2)}`;
   const numeroFinal = `55${numeroLimpo}`;
 
-  console.log(`[SIAA] 📡 Enviando WhatsApp para: ${numeroFinal}`);
-
   let endpoint = `/message/sendText/${restaurant.evolutionInstance}`;
   let payload: any = { number: numeroFinal, text: messageText };
 
@@ -296,6 +294,56 @@ app.get('/api/v1/restaurant/:slug', async (req: ExpressRequest, res: Response) =
   }
 });
 
+// ============================================================================
+// 👤 CUSTOMER LOOKUP — Autocomplete por telefone
+// ============================================================================
+app.get('/api/v1/customer/:phone', async (req: ExpressRequest, res: Response) => {
+  const { phone } = req.params;
+  const { restaurantId } = req.query;
+
+  if (!phone || !restaurantId) {
+    return res.status(400).json({ error: 'phone e restaurantId são obrigatórios.' });
+  }
+
+  try {
+    const phoneDigits = (phone as string).replace(/\D/g, '');
+
+    // Busca todos do restaurante e filtra por telefone normalizado em memória
+    const allOrders = await prisma.order.findMany({
+      where: { restaurantId: restaurantId as string },
+      orderBy: { createdAt: 'desc' },
+      take: 200,
+      include: { items: true },
+    });
+
+    const orders = allOrders
+      .filter(o => o.customerPhone.replace(/\D/g, '') === phoneDigits)
+      .slice(0, 3);
+
+    if (orders.length === 0) {
+      return res.status(404).json({ found: false });
+    }
+
+    const lastOrders = orders.map(order => ({
+      id: order.id,
+      createdAt: order.createdAt,
+      total: order.total,
+      status: order.status,
+      items: order.items.map((i: any) => ({
+        name: i.name,
+        quantity: i.quantity,
+        price: i.price,
+      })),
+    }));
+
+    res.json({ found: true, name: orders[0].customerName, lastOrders });
+
+  } catch (error) {
+    console.error('[SIAA] Erro no customer lookup:', error);
+    res.status(500).json({ error: 'Erro interno.' });
+  }
+});
+
 app.post('/api/v1/order', async (req: ExpressRequest, res: Response) => {
   const { restaurantId, cart, customerData, total } = req.body;
 
@@ -383,7 +431,7 @@ app.post('/api/v1/order', async (req: ExpressRequest, res: Response) => {
     const customerMsg = `Olá, *${customerData.name}*! 👋\n\n` +
                         `Recebemos o seu pedido com sucesso! 🎉\n\n` +
                         `🛒 *Seu Pedido:*\n${itemsListTxt}\n\n` +
-                        `💰 *Total:* R$ ${total.toFixed(2).replace('.', ',')} (${paymentBR})\n` +
+                        `💰 *Total:* R$ ${total.toFixed(2).replace('.', ',')} (${paymentBR})${changeLine}\n` +
                         `📦 *Forma:* ${orderTypeBR}\n\n` +
                         `⏱️ *Tempo estimado:* 30-60 min\n\n` +
                         `Já enviamos para a nossa cozinha e logo começaremos o preparo! 👨‍🍳 Avisaremos por aqui qualquer mudança no status do seu pedido.`;
@@ -447,12 +495,12 @@ app.patch('/api/v1/siaa-admin/pdv/orders/:orderId/status', authenticateToken, as
         statusMsg = `Boas notícias, *${order.customerName}*! 🛵💨\n\n` +
                     `Seu pedido acabou de *sair para entrega* e está a caminho do endereço:\n` +
                     `📍 _${order.address}_\n\n` +
-                    `Agradecemos a preferência e bom apetite! 🍽️`;
+                    `Agradecemos a preferência e bom apetite! ☺️`;
       } else if (order.orderType === 'pickup') {
-        statusMsg = `Boas notícias, *${order.customerName}*! 🏠✨\n\n` +
+        statusMsg = `Boas notícias, *${order.customerName}*!\n\n` +
                     `Seu pedido *já está pronto* e embalado!\n` +
                     `Você já pode vir retirar no balcão.\n\n` +
-                    `Agradecemos a preferência! 🍽️`;
+                    `Agradecemos a preferência! ☺️`;
       }
       if (statusMsg && order.customerPhone) {
         await sendWhatsAppMessage(order.restaurant, order.customerPhone, statusMsg);
@@ -605,6 +653,36 @@ app.post('/api/v1/siaa-admin/login', async (req: ExpressRequest, res: Response) 
     });
   } catch (error) {
     res.status(500).json({ error: 'Erro interno.' });
+  }
+});
+
+// ROTA PARA LER O STATUS (O PDV CHAMA ISSO NO CARREGAMENTO)
+app.get('/api/v1/siaa-admin/restaurant/pause', authenticateToken, async (req: AuthRequest, res: Response) => {
+  try {
+    const restaurant = await prisma.restaurant.findUnique({ 
+      where: { id: req.restaurantId },
+      select: { isPaused: true } 
+    });
+    
+    if (!restaurant) return res.status(404).json({ error: "Restaurante não encontrado" });
+    
+    res.json({ isPaused: restaurant.isPaused });
+  } catch (error) {
+    res.status(500).json({ error: 'Erro ao buscar status' });
+  }
+});
+
+// SUA ROTA DE ATUALIZAR (MANTENHA ESSA QUE VOCÊ JÁ FEZ)
+app.put('/api/v1/siaa-admin/restaurant/pause', authenticateToken, async (req: AuthRequest, res: Response) => {
+  try {
+    const { isPaused } = req.body;
+    const updated = await prisma.restaurant.update({  
+      where: { id: req.restaurantId },
+      data: { isPaused }
+    });
+    res.json({ success: true, isPaused: updated.isPaused });
+  } catch (error) {
+    res.status(500).json({ error: 'Erro ao pausar operação' });
   }
 });
 
