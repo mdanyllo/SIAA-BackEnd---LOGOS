@@ -333,10 +333,16 @@ app.get('/api/v1/customer/:phone', async (req: ExpressRequest, res: Response) =>
         name: i.name,
         quantity: i.quantity,
         price: i.price,
+        variation: i.variation || undefined,  
       })),
     }));
 
-    res.json({ found: true, name: orders[0].customerName, lastOrders });
+    // Último endereço de entrega (ignora retiradas)
+    const lastAddress = orders.find(o =>
+      o.address && o.address !== 'Retirada no Local'
+    )?.address || null;
+
+    res.json({ found: true, name: orders[0].customerName, lastOrders, lastAddress });
 
   } catch (error) {
     console.error('[SIAA] Erro no customer lookup:', error);
