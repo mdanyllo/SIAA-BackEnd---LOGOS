@@ -7,10 +7,30 @@ import jwt from 'jsonwebtoken';
 import bcrypt from 'bcrypt';
 import { v2 as cloudinary } from 'cloudinary';
 import multer from 'multer';
+import rateLimit from 'express-rate-limit';
 import { CloudinaryStorage } from 'multer-storage-cloudinary';
 
 const prisma = new PrismaClient();
 const app = express();
+
+// ── Rate limiting ────────────────────────────────────────────────────────────
+// Pedidos: máx 10 por IP a cada 5 minutos (evita spam)
+const orderLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Muitas tentativas. Aguarde alguns minutos.' },
+});
+
+// Login: máx 10 tentativas por IP a cada 15 minutos (evita brute force)
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Muitas tentativas de login. Tente novamente em 15 minutos.' },
+});
 
 app.use(cors());
 app.use(express.json());
@@ -358,7 +378,7 @@ app.get('/api/v1/customer/:phone', async (req: ExpressRequest, res: Response) =>
   }
 });
 
-app.post('/api/v1/order', async (req: ExpressRequest, res: Response) => {
+app.post('/api/v1/order', orderLimiter, async (req: ExpressRequest, res: Response) => {
   const { restaurantId, cart, customerData, total } = req.body;
 
   try {
@@ -636,7 +656,7 @@ app.get('/api/v1/siaa-admin/whatsapp/connect', authenticateToken, async (req: Au
   }
 });
 
-app.post('/api/v1/siaa-admin/login', async (req: ExpressRequest, res: Response) => {
+app.post('/api/v1/siaa-admin/login', loginLimiter, async (req: ExpressRequest, res: Response) => {
   const { email, password } = req.body;
  
   try {

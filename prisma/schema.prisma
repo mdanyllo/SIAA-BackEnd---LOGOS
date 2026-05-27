@@ -67,6 +67,7 @@ model Restaurant {
   closedToday       Boolean     @default(false)
 
   isPaused          Boolean     @default(false)
+  primaryColor      String?     @default("#D97706")
 
   admin             AdminUser?
   products          Product[]
