@@ -284,7 +284,7 @@ app.post('/cron/reset', async (req, res) => {
 });
 
 // ============================================================================
-// 🚀 ENDPOINTS DA API
+// Rotas dos Restaurantes 
 // ============================================================================
 
 app.post('/api/v1/upload', upload.single('file'), (req: ExpressRequest, res: Response) => {
@@ -319,7 +319,7 @@ app.get('/api/v1/restaurant/:slug', async (req: ExpressRequest, res: Response) =
 // ============================================================================
 app.get('/api/v1/customer/:phone', async (req: ExpressRequest, res: Response) => {
   const { phone } = req.params;
-  const { restaurantId } = req.query;
+  const restaurantId = req.query.restaurantId as string | undefined;
 
   if (!phone || !restaurantId) {
     return res.status(400).json({ error: 'phone e restaurantId são obrigatórios.' });
@@ -477,7 +477,7 @@ app.post('/api/v1/order', orderLimiter, async (req: ExpressRequest, res: Respons
       await sendWhatsAppMessage(restaurant, customerData.phone, customerMsg);
     }
 
-    res.status(200).json({ success: true });
+    res.status(200).json({ success: true, orderId: savedOrder.id });
   } catch (error) {
     res.status(500).json({ error: "Falha ao processar pedido" });
   }
@@ -503,6 +503,44 @@ app.get('/api/v1/siaa-admin/pdv/orders', authenticateToken, async (req: AuthRequ
     console.error("Erro ao carregar PDV:", error);
     res.status(500).json({ error: 'Erro interno' });
   }
+});
+
+// ── SSE — mapa de clientes ouvindo por orderId ────────────────────────────
+const sseClients = new Map<string, Set<Response>>();
+
+function sseEmit(orderId: string, data: object) {
+  const clients = sseClients.get(orderId);
+  if (!clients) return;
+  const payload = `data: ${JSON.stringify(data)}\n\n`;
+  clients.forEach(res => { try { res.write(payload); } catch {} });
+}
+
+// Endpoint SSE — cliente conecta aqui para ouvir atualizações do pedido
+app.get('/api/v1/order/:orderId/status-stream', async (req: ExpressRequest, res: Response) => {
+  const orderId = req.params.orderId as string;
+
+  // Busca status inicial
+  const order = await prisma.order.findUnique({ where: { id: orderId }, select: { status: true } });
+  if (!order) return res.status(404).end();
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no'); // nginx: desativa buffer
+  res.flushHeaders();
+
+  // Envia status atual imediatamente
+  res.write(`data: ${JSON.stringify({ status: order.status })}\n\n`);
+
+  // Registra o cliente
+  if (!sseClients.has(orderId)) sseClients.set(orderId, new Set());
+  sseClients.get(orderId)!.add(res);
+
+  // Remove quando o cliente desconectar
+  req.on('close', () => {
+    sseClients.get(orderId)?.delete(res);
+    if (sseClients.get(orderId)?.size === 0) sseClients.delete(orderId);
+  });
 });
 
 app.patch('/api/v1/siaa-admin/pdv/orders/:orderId/status', authenticateToken, async (req: AuthRequest, res: Response) => {
@@ -541,6 +579,9 @@ app.patch('/api/v1/siaa-admin/pdv/orders/:orderId/status', authenticateToken, as
       }
     }
     
+    // Empurra atualização para todos os clientes ouvindo esse pedido
+    sseEmit(req.params.orderId as string, { status: newStatus });
+
     res.json(updated);
   } catch (error) {
     res.status(500).json({ error: 'Erro' });
@@ -788,4 +829,10 @@ app.delete('/api/v1/siaa-admin/products/:productId', authenticateToken, async (r
   }
 });
 
-app.listen(3001, () => console.log("🚀 LOGOS SIAA API Rodando na Oracle (Conectada à Hostinger)"));
+// ============================================================================
+// Rotas dos Serviços de Agendamento
+// ============================================================================
+
+
+
+app.listen(3001, () => console.log("Backend rodando sem erros"));
