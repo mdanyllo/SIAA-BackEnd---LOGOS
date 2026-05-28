@@ -9,6 +9,7 @@ import { v2 as cloudinary } from 'cloudinary';
 import multer from 'multer';
 import rateLimit from 'express-rate-limit';
 import { CloudinaryStorage } from 'multer-storage-cloudinary';
+import helmet from 'helmet';
 
 const prisma = new PrismaClient();
 const app = express();
@@ -32,8 +33,41 @@ const loginLimiter = rateLimit({
   message: { error: 'Muitas tentativas de login. Tente novamente em 15 minutos.' },
 });
 
-app.use(cors());
-app.use(express.json());
+const allowedOrigins = [
+  'https://www.atendimentoautomatizado.com.br',
+  'https://atendimentoautomatizado.com.br',
+  process.env.FRONTEND_URL,
+].filter(Boolean) as string[];
+
+app.use(helmet());
+app.use(cors({
+  origin: (origin, callback) => {
+    // Sem origin = Postman, mobile, server-to-server → deixa passar
+    if (!origin) return callback(null, true);
+    // Localhost em qualquer porta → só deixa passar em desenvolvimento
+    if (process.env.NODE_ENV !== 'production' && origin.startsWith('http://localhost')) {
+      return callback(null, true);
+    }
+    // Qualquer subdomínio de atendimentoautomatizado.com.br
+    if (origin.endsWith('.atendimentoautomatizado.com.br')) {
+      return callback(null, true);
+    }
+    // Origens explícitas
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+
+    return callback(new Error('Origem não permitida pelo CORS'));
+  },
+  credentials: true,
+}));
+app.use(express.json({ limit: '2mb' }));
+
+const globalLimiter = rateLimit({
+  windowMs: 1 * 60 * 1000,                  
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Muitas requisições. Tente novamente em instantes.' },
+});
+app.use(globalLimiter);
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -51,11 +85,14 @@ const storage = new CloudinaryStorage({
 
 const upload = multer({ storage: storage });
 
-const JWT_SECRET = process.env.JWT_SECRET || 'chave_super_secreta_logos_tec';
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) throw new Error('[SIAA] JWT_SECRET não definido no .env. Servidor abortado.'); 
 const evolutionBaseUrl = process.env.EVOLUTION_URL?.replace(/\/$/, '');
 
 interface AuthRequest extends ExpressRequest {
   restaurantId?: string;
+  storeId?: string;
+  serviceId?: string; // <- Aqui resolvemos o erro do serviceId não existir!
   segment?: string;
 }
 
@@ -70,8 +107,14 @@ const authenticateToken = (req: AuthRequest, res: Response, next: NextFunction) 
       establishmentId: string;
       segment: string;
     };
-    req.restaurantId = payload.establishmentId;
-    req.segment      = payload.segment;
+    
+    req.segment = payload.segment;
+    
+    // Distribuindo o ID para a propriedade correta baseada no segmento:
+    if (payload.segment === 'restaurant') req.restaurantId = payload.establishmentId;
+    if (payload.segment === 'retail') req.storeId = payload.establishmentId;
+    if (payload.segment === 'service') req.serviceId = payload.establishmentId;
+    
     next();
   } catch {
     return res.status(403).json({ error: 'Token inválido ou expirado.' });
@@ -283,11 +326,34 @@ app.post('/cron/reset', async (req, res) => {
   }
 });
 
+// IDENTIFICADOR DE SUBDOMÍNIO (Descobre de qual segmento o cliente é)
+app.get('/api/v1/public/tenant/identify/:slug', async (req: ExpressRequest, res: Response) => {
+  try {
+    const slug = req.params.slug as string;
+    
+    // Procura em Restaurantes
+    const rest = await prisma.restaurant.findUnique({ where: { slug }, select: { id: true } });
+    if (rest) return res.json({ segment: 'restaurant' });
+
+    // Procura em Lojas/Varejo
+    const store = await prisma.store.findUnique({ where: { slug }, select: { id: true } });
+    if (store) return res.json({ segment: 'retail' });
+
+    // Procura em Serviços/Agendamentos
+    const serv = await prisma.service.findUnique({ where: { slug }, select: { id: true } });
+    if (serv) return res.json({ segment: 'service' });
+
+    return res.status(404).json({ error: 'Estabelecimento não encontrado' });
+  } catch (error) {
+    res.status(500).json({ error: 'Erro ao identificar estabelecimento' });
+  }
+});
+
 // ============================================================================
 // Rotas dos Restaurantes 
 // ============================================================================
 
-app.post('/api/v1/upload', upload.single('file'), (req: ExpressRequest, res: Response) => {
+app.post('/api/v1/upload', authenticateToken, upload.single('file'), (req: ExpressRequest, res: Response) => {
   try {
     if (!req.file) return res.status(400).json({ error: "Nenhum arquivo enviado." });
     res.json({ url: req.file.path });
@@ -317,7 +383,7 @@ app.get('/api/v1/restaurant/:slug', async (req: ExpressRequest, res: Response) =
 // ============================================================================
 // 👤 CUSTOMER LOOKUP — Autocomplete por telefone
 // ============================================================================
-app.get('/api/v1/customer/:phone', async (req: ExpressRequest, res: Response) => {
+app.get('/api/v1/customer/:phone', orderLimiter, async (req: ExpressRequest, res: Response) => {
   const { phone } = req.params;
   const restaurantId = req.query.restaurantId as string | undefined;
 
@@ -776,6 +842,8 @@ app.put('/api/v1/siaa-admin/restaurant', authenticateToken, async (req: AuthRequ
     const updateData = { ...req.body };
     delete updateData.id;
     delete updateData.password;
+    delete updateData.evolutionApiKey;
+    delete updateData.evolutionInstance;
     await prisma.restaurant.update({ where: { id: req.restaurantId }, data: updateData });
     res.json({ success: true });
   } catch (error) {
@@ -833,6 +901,207 @@ app.delete('/api/v1/siaa-admin/products/:productId', authenticateToken, async (r
 // Rotas dos Serviços de Agendamento
 // ============================================================================
 
+app.get('/api/v1/public/tenant/:slug', async (req: ExpressRequest, res: Response) => {
+  try {
+    const slug = req.params.slug as string;
+    
+    const serviceTenant = await prisma.service.findUnique({
+      where: { slug },
+      include: {
+        products: {
+          where: { available: true },
+          orderBy: { order: 'asc' }
+        }
+      }
+    });
 
+    if (serviceTenant) {
+      return res.json(serviceTenant);
+    }
+
+    return res.status(404).json({ error: 'Estabelecimento não encontrado' });
+  } catch (error) {
+    console.error("Erro ao buscar tenant:", error);
+    res.status(500).json({ error: 'Erro interno do servidor' });
+  }
+});
+
+// 2. BUSCAR DADOS DO ESTABELECIMENTO DE SERVIÇO (ME)
+app.get('/api/v1/siaa-admin/service/me', authenticateToken, async (req: AuthRequest, res: Response) => {
+  try {
+    const serviceId = req.serviceId as string; 
+
+    const serviceData = await prisma.service.findUnique({
+      where: { id: serviceId },
+      include: {
+        products: {
+          orderBy: { order: 'asc' }
+        }
+      }
+    });
+
+    if (!serviceData) return res.status(404).json({ error: 'Serviço não encontrado' });
+    res.json(serviceData);
+  } catch (error) {
+    res.status(500).json({ error: 'Erro ao buscar dados do estabelecimento' });
+  }
+});
+
+// 3. ATUALIZAR DADOS DO ESTABELECIMENTO DE SERVIÇO
+app.put('/api/v1/siaa-admin/service', authenticateToken, async (req: AuthRequest, res: Response) => {
+  try {
+    const serviceId = req.serviceId as string;
+    const {
+      name, slug, logo, bannerImage, bannerTitle, bannerSubtitle,
+      whatsapp, pixKey, operatingDays, openTime, closeTime, categories
+    } = req.body;
+
+    const updatedService = await prisma.service.update({
+      where: { id: serviceId },
+      data: {
+        name, slug, logo, bannerImage, bannerTitle, bannerSubtitle,
+        whatsapp, pixKey, operatingDays, openTime, closeTime, 
+        categories: categories ? categories : undefined
+      }
+    });
+
+    res.json(updatedService);
+  } catch (error) {
+    res.status(500).json({ error: 'Erro ao atualizar estabelecimento' });
+  }
+});
+
+// 4. CRIAR NOVO SERVIÇO/PRODUTO
+app.post('/api/v1/siaa-admin/service-products', authenticateToken, async (req: AuthRequest, res: Response) => {
+  try {
+    const serviceId = req.serviceId as string;
+    const { name, description, price, durationMin, image, category, available } = req.body;
+
+    const newProduct = await prisma.serviceProduct.create({
+      data: {
+        name, description, price, image, category, available,
+        durationMin: durationMin || 30,
+        serviceId
+      }
+    });
+
+    res.status(201).json(newProduct);
+  } catch (error) {
+    res.status(500).json({ error: 'Erro ao criar serviço' });
+  }
+});
+
+// 5. ATUALIZAR SERVIÇO/PRODUTO
+app.put('/api/v1/siaa-admin/service-products/:id', authenticateToken, async (req: AuthRequest, res: Response) => {
+  try {
+    const id = req.params.id as string; // <-- Corrige o erro "string | string[]"
+    const { name, description, price, durationMin, image, category, available } = req.body;
+
+    const updatedProduct = await prisma.serviceProduct.update({
+      where: { id },
+      data: { name, description, price, durationMin, image, category, available }
+    });
+
+    res.json(updatedProduct);
+  } catch (error) {
+    res.status(500).json({ error: 'Erro ao atualizar serviço' });
+  }
+});
+
+// 6. EXCLUIR SERVIÇO/PRODUTO
+app.delete('/api/v1/siaa-admin/service-products/:id', authenticateToken, async (req: AuthRequest, res: Response) => {
+  try {
+    const id = req.params.id as string; // <-- Corrige o erro "string | string[]"
+    await prisma.serviceProduct.delete({ where: { id } });
+    res.json({ message: 'Serviço excluído com sucesso' });
+  } catch (error) {
+    res.status(500).json({ error: 'Erro ao excluir serviço' });
+  }
+});
+
+// 7. LISTAR AGENDAMENTOS
+app.get('/api/v1/siaa-admin/appointments', authenticateToken, async (req: AuthRequest, res: Response) => {
+  try {
+    const serviceId = req.serviceId as string;
+    
+    const appointments = await prisma.appointment.findMany({
+      where: { serviceId },
+      include: { items: true },
+      orderBy: { scheduledAt: 'asc' }
+    });
+
+    res.json(appointments);
+  } catch (error) {
+    res.status(500).json({ error: 'Erro ao buscar agenda' });
+  }
+});
+
+// 8. ATUALIZAR STATUS DO AGENDAMENTO
+app.patch('/api/v1/siaa-admin/appointments/:id/status', authenticateToken, async (req: AuthRequest, res: Response) => {
+  try {
+    const id = req.params.id as string; // <-- Corrige o erro "string | string[]"
+    const { status } = req.body; 
+
+    const updatedAppointment = await prisma.appointment.update({
+      where: { id },
+      data: { status }
+    });
+
+    res.json(updatedAppointment);
+  } catch (error) {
+    res.status(500).json({ error: 'Erro ao atualizar status do agendamento' });
+  }
+});
+
+// 9. REORDENAR SERVIÇOS
+app.put('/api/v1/siaa-admin/service-products/reorder', authenticateToken, async (req: AuthRequest, res: Response) => {
+  try {
+    const { order } = req.body;
+    await Promise.all(
+      order.map((item: { id: string; order: number }) =>
+        prisma.serviceProduct.update({
+          where: { id: item.id },
+          data: { order: item.order },
+        })
+      )
+    );
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: 'Erro ao reordenar produtos' });
+  }
+});
+
+app.post('/api/v1/public/appointments', async (req: ExpressRequest, res: Response) => {
+  try {
+    const { tenantId, customerName, customerPhone, date, time, services, total } = req.body;
+    
+    // Converte a data (YYYY-MM-DD) e hora (HH:mm) para o formato DateTime real
+    const scheduledAt = new Date(`${date}T${time}:00-03:00`); 
+
+    const appointment = await prisma.appointment.create({
+      data: {
+        serviceId: tenantId,
+        customerName,
+        customerPhone,
+        paymentMethod: 'A Combinar na Loja',
+        total,
+        status: 'pending',
+        scheduledAt, // <-- Aqui está o segredo do Horário Real!
+        items: {
+          create: services.map((s: any) => ({
+            name: s.name,
+            quantity: 1,
+            price: s.price
+          }))
+        }
+      }
+    });
+
+    res.status(201).json(appointment);
+  } catch (error) {
+    console.error("Erro ao criar agendamento:", error);
+    res.status(500).json({ error: 'Erro interno' });
+  }
+});
 
 app.listen(3001, () => console.log("Backend rodando sem erros"));
