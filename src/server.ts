@@ -14,8 +14,6 @@ import helmet from 'helmet';
 const prisma = new PrismaClient();
 const app = express();
 
-// ── Rate limiting ────────────────────────────────────────────────────────────
-// Pedidos: máx 10 por IP a cada 5 minutos (evita spam)
 const orderLimiter = rateLimit({
   windowMs: 5 * 60 * 1000,
   max: 10,
@@ -42,32 +40,47 @@ const allowedOrigins = [
 app.use(helmet());
 app.use(cors({
   origin: (origin, callback) => {
-    // Sem origin = Postman, mobile, server-to-server → deixa passar
+    // Sem origin = Postman, mobile, server-to-server → permite
     if (!origin) return callback(null, true);
-    // Localhost em qualquer porta → só deixa passar em desenvolvimento
-    if (process.env.NODE_ENV !== 'production' && origin.startsWith('http://localhost')) {
-      return callback(null, true);
-    }
-    // Qualquer subdomínio de atendimentoautomatizado.com.br
-    if (origin.endsWith('.atendimentoautomatizado.com.br')) {
-      return callback(null, true);
-    }
-    // Origens explícitas
-    if (allowedOrigins.includes(origin)) return callback(null, true);
 
-    return callback(new Error('Origem não permitida pelo CORS'));
+    // Localhost para desenvolvimento local (inclui subdomínios como cozinha.localhost:5173)
+    if (origin.includes('localhost') || origin.includes('127.0.0.1')) {
+      return callback(null, true);
+    }
+
+    // Domínio principal, www, clientes e backend
+    if (
+      origin === 'https://atendimentoautomatizado.com.br' ||
+      origin === 'https://www.atendimentoautomatizado.com.br' ||
+      origin.endsWith('.atendimentoautomatizado.com.br') ||
+      origin === 'https://siaalogostcnlg.ddns.net'
+    ) {
+      return callback(null, true);
+    }
+
+    console.warn(`[CORS] Origem bloqueada: ${origin}`);
+    return callback(null, false);
   },
   credentials: true,
 }));
+
 app.use(express.json({ limit: '2mb' }));
 
 const globalLimiter = rateLimit({
-  windowMs: 1 * 60 * 1000,                  
+  windowMs: 1 * 60 * 1000,
+  max: 120,                  
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Muitas requisições. Tente novamente em instantes.' },
 });
-app.use(globalLimiter);
+app.use((req, res, next) => {
+  // Rotas públicas de cardápio/loja não entram no rate limit global
+  if (req.path.startsWith('/api/v1/restaurant/') || 
+      req.path.startsWith('/api/v1/public/')) {
+    return next();
+  }
+  return globalLimiter(req, res, next);
+});
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -168,7 +181,7 @@ const sendWhatsAppMessage = async (
 // ============================================================================
 // 🔄 ROTINA: ABERTURA, TURNOS E FECHAMENTO DE CAIXA (RODA A CADA 1 MINUTO)
 // ============================================================================
-app.post('/cron/fechamento', async (req, res) => {
+app.post('/cron/fechamento', cors(), async (req, res) => {
   // 🔐 proteção via variável de ambiente
   const cronSecret = process.env.CRON_SECRET;
   if (!cronSecret || req.headers.authorization !== `Bearer ${cronSecret}`) {
@@ -308,7 +321,7 @@ app.post('/cron/fechamento', async (req, res) => {
 // ============================================================================
 // 🔄 CRON RESET: Zera flags de abertura/fechamento à meia-noite (00:00)
 // ============================================================================
-app.post('/cron/reset', async (req, res) => {
+app.post('/cron/reset', cors(), async (req, res) => {
   const cronSecret = process.env.CRON_SECRET;
   if (!cronSecret || req.headers.authorization !== `Bearer ${cronSecret}`) {
     return res.status(403).json({ error: "forbidden" });
