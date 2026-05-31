@@ -13,6 +13,7 @@ import helmet from 'helmet';
 
 const prisma = new PrismaClient();
 const app = express();
+app.set('trust proxy', 1);
 
 const orderLimiter = rateLimit({
   windowMs: 5 * 60 * 1000,
@@ -53,7 +54,8 @@ app.use(cors({
       origin === 'https://atendimentoautomatizado.com.br' ||
       origin === 'https://www.atendimentoautomatizado.com.br' ||
       origin.endsWith('.atendimentoautomatizado.com.br') ||
-      origin === 'https://siaalogostcnlg.ddns.net'
+      origin === 'https://siaalogostcnlg.ddns.net' ||
+      origin.endsWith('.vercel.app')
     ) {
       return callback(null, true);
     }
