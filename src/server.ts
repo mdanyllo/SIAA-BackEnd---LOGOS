@@ -919,8 +919,9 @@ app.delete('/api/v1/siaa-admin/products/:productId', authenticateToken, async (r
 app.get('/api/v1/public/tenant/:slug', async (req: ExpressRequest, res: Response) => {
   try {
     const slug = req.params.slug as string;
-    
-    const serviceTenant = await prisma.service.findUnique({
+
+    // 1. Tenta Restaurante
+    const restaurant = await prisma.restaurant.findUnique({
       where: { slug },
       include: {
         products: {
@@ -929,10 +930,34 @@ app.get('/api/v1/public/tenant/:slug', async (req: ExpressRequest, res: Response
         }
       }
     });
-
-    if (serviceTenant) {
-      return res.json(serviceTenant);
+    if (restaurant) {
+      const { evolutionApiKey, evolutionInstance, ...publicData } = restaurant;
+      return res.json({ ...publicData, segment: 'restaurant' });
     }
+
+    // 2. Tenta Loja/Varejo
+    const store = await prisma.store.findUnique({
+      where: { slug },
+      include: {
+        products: {
+          where: { available: true },
+          orderBy: { order: 'asc' }
+        }
+      }
+    });
+    if (store) return res.json({ ...store, segment: 'retail' });
+
+    // 3. Tenta Serviço/Agendamento
+    const service = await prisma.service.findUnique({
+      where: { slug },
+      include: {
+        products: {
+          where: { available: true },
+          orderBy: { order: 'asc' }
+        }
+      }
+    });
+    if (service) return res.json({ ...service, segment: 'service' });
 
     return res.status(404).json({ error: 'Estabelecimento não encontrado' });
   } catch (error) {
