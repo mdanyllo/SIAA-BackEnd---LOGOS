@@ -377,24 +377,6 @@ app.post('/api/v1/upload', authenticateToken, upload.single('file'), (req: Expre
   }
 });
 
-app.get('/api/v1/restaurant/:slug', async (req: ExpressRequest, res: Response) => {
-  const { slug } = req.params;
-  try {
-    const restaurant = await prisma.restaurant.findUnique({
-      where: { slug: slug as string },
-      include: { products: true }
-    });
-
-    if (!restaurant) return res.status(404).json({ error: "Estabelecimento não encontrado" });
-
-    // Remove campos sensíveis antes de enviar para o público
-    const { evolutionApiKey, evolutionInstance, ...publicData } = restaurant;
-    res.json(publicData);
-  } catch (error) {
-    res.status(500).json({ error: "Erro interno no servidor" });
-  }
-});
-
 // ============================================================================
 // 👤 CUSTOMER LOOKUP — Autocomplete por telefone
 // ============================================================================
@@ -558,6 +540,7 @@ app.post('/api/v1/order', orderLimiter, async (req: ExpressRequest, res: Respons
       await sendWhatsAppMessage(restaurant, customerData.phone, customerMsg);
     }
 
+    pdvSseEmit(restaurantId, { type: 'new_order', order: savedOrder });
     res.status(200).json({ success: true, orderId: savedOrder.id });
   } catch (error) {
     res.status(500).json({ error: "Falha ao processar pedido" });
@@ -595,6 +578,58 @@ function sseEmit(orderId: string, data: object) {
   const payload = `data: ${JSON.stringify(data)}\n\n`;
   clients.forEach(res => { try { res.write(payload); } catch {} });
 }
+
+// ── SSE — mapa do PDV ouvindo por restaurantId ───────────────────────────
+const pdvSseClients = new Map<string, Set<Response>>();
+
+function pdvSseEmit(restaurantId: string, data: object) {
+  const clients = pdvSseClients.get(restaurantId);
+  if (!clients) return;
+  const payload = `data: ${JSON.stringify(data)}\n\n`;
+  clients.forEach(res => { try { res.write(payload); } catch {} });
+}
+
+// Endpoint SSE — PDV conecta aqui para receber pedidos em tempo real
+app.get('/api/v1/siaa-admin/pdv/orders/stream', (req: AuthRequest, res: Response, next: NextFunction) => {
+  // EventSource não suporta headers — token vem via query string
+  const tokenRaw = req.query.token as string | undefined;
+  if (!tokenRaw) return res.status(401).end();
+  try {
+    const payload = jwt.verify(tokenRaw, JWT_SECRET) as { adminId: string; establishmentId: string; segment: string };
+    req.segment = payload.segment;
+    if (payload.segment === 'restaurant') req.restaurantId = payload.establishmentId;
+    if (payload.segment === 'retail')     req.storeId      = payload.establishmentId;
+    if (payload.segment === 'service')    req.serviceId    = payload.establishmentId;
+    next();
+  } catch { return res.status(403).end(); }
+}, async (req: AuthRequest, res: Response) => {
+  const restaurantId = req.restaurantId!;
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders();
+
+  // Envia pedidos do dia imediatamente ao conectar
+  const spDateStr = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
+  const startOfDay = new Date(`${spDateStr}T00:00:00-03:00`);
+  const endOfDay   = new Date(`${spDateStr}T23:59:59-03:00`);
+  const orders = await prisma.order.findMany({
+    where: { restaurantId, createdAt: { gte: startOfDay, lte: endOfDay } },
+    include: { items: true },
+    orderBy: { createdAt: 'desc' },
+  });
+  res.write(`data: ${JSON.stringify({ type: 'init', orders })}\n\n`);
+
+  if (!pdvSseClients.has(restaurantId)) pdvSseClients.set(restaurantId, new Set());
+  pdvSseClients.get(restaurantId)!.add(res);
+
+  req.on('close', () => {
+    pdvSseClients.get(restaurantId)?.delete(res);
+    if (pdvSseClients.get(restaurantId)?.size === 0) pdvSseClients.delete(restaurantId);
+  });
+});
 
 // Endpoint SSE — cliente conecta aqui para ouvir atualizações do pedido
 app.get('/api/v1/order/:orderId/status-stream', async (req: ExpressRequest, res: Response) => {
